@@ -19,6 +19,16 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Arşivlenen form fotoğraflarını galerinize kaydedebilmek için fotoğraf erişimine ihtiyaç var.",
+          "savePhotosPermission": "Arşivlenen form fotoğraflarını galerinize .jpeg olarak kaydedebilmek için izin gerekiyor.",
+          "isAccessMediaLocationEnabled": false
+        }
+      ]
+    ]
   }
 }
