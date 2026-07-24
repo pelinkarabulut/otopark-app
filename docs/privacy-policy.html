@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Otopark Formu - Gizlilik Politikası</title>
+<style>
+  :root {
+    color-scheme: light;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 32px 20px 80px;
+    line-height: 1.65;
+    color: #1f2430;
+    background: #fafafa;
+  }
+  h1 {
+    font-size: 1.9rem;
+    margin-bottom: 4px;
+  }
+  .updated {
+    color: #6b7280;
+    font-size: 0.9rem;
+    margin-bottom: 32px;
+  }
+  h2 {
+    font-size: 1.25rem;
+    margin-top: 36px;
+    border-bottom: 2px solid #e5e7eb;
+    padding-bottom: 6px;
+  }
+  ul {
+    padding-left: 22px;
+  }
+  li {
+    margin-bottom: 8px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 0.95rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border: 1px solid #e5e7eb;
+    vertical-align: top;
+  }
+  th {
+    background: #f1f5f9;
+  }
+  .contact-box {
+    background: #eef2ff;
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-top: 12px;
+  }
+  a {
+    color: #2563eb;
+  }
+  .note {
+    background: #fff7ed;
+    border: 1px solid #fed7aa;
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 0.9rem;
+  }
+</style>
+</head>
+<body>
+
+  <h1>Otopark Formu - Gizlilik Politikası</h1>
+  <p class="updated">Son güncelleme: 24 Temmuz 2026</p>
+
+  <p>
+    Bu Gizlilik Politikası, "Otopark Formu" mobil uygulamasını ("Uygulama") kullanırken
+    hangi verilerin toplandığını, nasıl kullanıldığını, kimlerle paylaşıldığını ve
+    verileriniz üzerindeki haklarınızı açıklar. Uygulamayı kullanarak bu politikayı
+    kabul etmiş olursunuz.
+  </p>
+
+  <h2>1. Uygulama Ne İşe Yarar?</h2>
+  <p>
+    Otopark Formu, kullanıcıların elle doldurulmuş kağıt otopark/araç çıkış-dönüş
+    formlarının fotoğrafını çekmesine/seçmesine, bu formdaki bilgilerin yapay zeka
+    ile otomatik olarak dijital forma aktarılmasına, formların düzenlenmesine,
+    bulutta saklanmasına ve Excel olarak dışa aktarılmasına yardımcı olan bir
+    verimlilik uygulamasıdır.
+  </p>
+
+  <h2>2. Topladığımız Veriler</h2>
+  <table>
+    <tr>
+      <th>Veri türü</th>
+      <th>Açıklama</th>
+    </tr>
+    <tr>
+      <td>Fotoğraflar / Galeri erişimi</td>
+      <td>
+        Cihazınızın fotoğraf galerisinden seçtiğiniz form görselleri. Uygulama bu
+        görselleri yalnızca formdaki bilgileri okumak amacıyla kullanır.
+      </td>
+    </tr>
+    <tr>
+      <td>Form / araç verileri</td>
+      <td>
+        Form numarası, plaka, bölüm/departman, çıkış-dönüş tarihi/saati/kilometresi,
+        görev açıklaması ve sürücü adı gibi, formda yazılı olan bilgiler.
+      </td>
+    </tr>
+    <tr>
+      <td>Oluşturulan form görseli</td>
+      <td>
+        Kaydettiğiniz her form için, girdiğiniz bilgilerin düz yazı olarak yer aldığı
+        bir özet görsel (.jpeg) üretilir ve isteğe bağlı olarak cihazınızın
+        galerisine kaydedilir.
+      </td>
+    </tr>
+    <tr>
+      <td>Teknik/kullanım verileri</td>
+      <td>
+        Uygulamanın ve sunucunun düzgün çalışması için gerekli standart ağ istek
+        bilgileri (örn. IP adresi, istek zamanı) sunucu taraflı hız sınırlama
+        (rate limiting) amacıyla geçici olarak işlenir; kalıcı olarak
+        saklanmaz veya kimseyle paylaşılmaz.
+      </td>
+    </tr>
+  </table>
+
+  <p>
+    Uygulama; konum, kişi rehberi, mikrofon, kamera görüntüsü (canlı çekim) veya
+    kimlik/finansal bilgi <strong>toplamaz</strong>.
+  </p>
+
+  <h2>3. Verileri Nasıl Kullanıyoruz?</h2>
+  <ul>
+    <li>
+      Seçtiğiniz form fotoğrafı, içindeki el yazısı/matbu bilgileri otomatik olarak
+      okuyup dijital forma aktarabilmek için <strong>Google Gemini API</strong>'ye
+      (Google LLC) gönderilir. Fotoğraf, sadece bu analiz isteği süresince
+      işlenir.
+    </li>
+    <li>
+      Doldurduğunuz/onayladığınız form bilgileri, cihazlar arasında kaybolmaması ve
+      geçmiş kayıtlarınızı görebilmeniz için <strong>Supabase</strong> (bulut
+      veritabanı hizmeti) üzerinde saklanır.
+    </li>
+    <li>
+      Talep etmeniz halinde, kayıtlı formlarınız bir Excel dosyası olarak
+      oluşturulup cihazınıza indirilir/paylaşılır.
+    </li>
+  </ul>
+
+  <h2>4. Üçüncü Taraf Hizmet Sağlayıcılar</h2>
+  <p>Uygulama, aşağıdaki üçüncü taraf hizmetleri kullanır. Bu hizmetlerin kendi gizlilik politikaları geçerlidir:</p>
+  <ul>
+    <li>
+      <strong>Google Gemini API (Google LLC)</strong> - Form görsellerinin analiz
+      edilmesi için. Bkz.
+      <a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Google Gizlilik Politikası</a>.
+    </li>
+    <li>
+      <strong>Supabase Inc.</strong> - Form verilerinin bulutta saklanması için.
+      Bkz.
+      <a href="https://supabase.com/privacy" target="_blank" rel="noopener">Supabase Gizlilik Politikası</a>.
+    </li>
+  </ul>
+
+  <h2>5. Verilerin Saklanması ve Güvenliği</h2>
+  <p>
+    Form verileriniz, yetkili bulut veritabanı sağlayıcısı (Supabase) üzerinde
+    şifreli bağlantı (HTTPS) ile iletilir ve saklanır. Fotoğraflar yalnızca
+    analiz sırasında sunucumuza iletilir; sunucumuzda kalıcı olarak
+    saklanmaz. Verileriniz, uygulamayı kullanmayı bıraktığınızda veya silme
+    talebinde bulunduğunuzda kaldırılabilir.
+  </p>
+
+  <h2>6. Verilerinizin Silinmesini Talep Etme</h2>
+  <p>
+    Uygulama içindeki kayıt listesinden istediğiniz formu "Sil" butonuyla
+    kaldırabilirsiniz. Bulutta saklanan tüm verilerinizin tamamen silinmesini
+    talep etmek için aşağıdaki iletişim adresinden bizimle iletişime
+    geçebilirsiniz.
+  </p>
+
+  <h2>7. Çocukların Gizliliği</h2>
+  <p>
+    Uygulama, 13 yaşın altındaki çocuklara yönelik değildir ve bu yaş grubundan
+    bilerek veri toplanmamaktadır.
+  </p>
+
+  <h2>8. Politika Değişiklikleri</h2>
+  <p>
+    Bu Gizlilik Politikası zaman zaman güncellenebilir. Önemli değişiklikler bu
+    sayfa üzerinden yayınlanacaktır.
+  </p>
+
+  <h2>9. İletişim</h2>
+  <div class="contact-box">
+    <p>Gizlilik ile ilgili sorularınız veya veri silme talepleriniz için:</p>
+    <p>E-posta: <a href="mailto:pelinkarabulut089@gmail.com">BURAYA_EPOSTA_ADRESINIZI_YAZIN@example.com</a></p>
+  </div>
+
+  <p class="note">
+    Not: Yukarıdaki e-posta adresini, App Store / Play Store başvurularınızda ve
+    bu sayfada gerçek iletişim adresinizle değiştirmeniz gerekiyor.
+  </p>
+
+</body>
+</html>
