@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   KeyboardAvoidingView,
   ScrollView,
@@ -19,13 +19,13 @@ import { File, Directory, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import * as MediaLibrary from 'expo-media-library';
 import axios from 'axios';
-
-const GALLERY_ALBUM_NAME = 'Otopark Formları';
+import { supabase } from './lib/supabase';
 
 // Gerçek Wi-Fi IPv4 Adresin (192.168.8.104) güncellendi.
 const SERVER_BASE_URL = 'http://192.168.8.104:3000';
 const SERVER_ANALYZE_URL = `${SERVER_BASE_URL}/analyze`;
 const SERVER_EXPORT_URL = `${SERVER_BASE_URL}/export`;
+const SERVER_FORM_IMAGE_URL = `${SERVER_BASE_URL}/form-image`;
 
 const EMPTY_FORM = {
   formNo: '',
@@ -40,6 +40,47 @@ const EMPTY_FORM = {
   gorev: '',
   surucuAdi: '',
 };
+
+const SUPABASE_TABLE = 'otopark_formlari';
+
+// records state'indeki alanlar camelCase (formNo, cikisTarihi...), Supabase
+// tablosundaki sütunlar ise snake_case (form_no, cikis_tarihi...). Bu iki
+// fonksiyon aralarında dönüşüm yapar.
+function mapRecordToSupabaseRow(record) {
+  return {
+    id: Number(record.id),
+    form_no: record.formNo || null,
+    plaka: record.plaka || null,
+    bolum: record.bolum || null,
+    cikis_tarihi: record.cikisTarihi || null,
+    cikis_saati: record.cikisSaati || null,
+    cikis_km: record.cikisKm || null,
+    donus_tarihi: record.donusTarihi || null,
+    donus_saati: record.donusSaati || null,
+    donus_km: record.donusKm || null,
+    gorev: record.gorev || null,
+    surucu_adi: record.surucuAdi || null,
+    archived_uri: record.archivedUri || null,
+  };
+}
+
+function mapSupabaseRowToRecord(row) {
+  return {
+    id: String(row.id),
+    formNo: row.form_no || '',
+    plaka: row.plaka || '',
+    bolum: row.bolum || '',
+    cikisTarihi: row.cikis_tarihi || '',
+    cikisSaati: row.cikis_saati || '',
+    cikisKm: row.cikis_km || '',
+    donusTarihi: row.donus_tarihi || '',
+    donusSaati: row.donus_saati || '',
+    donusKm: row.donus_km || '',
+    gorev: row.gorev || '',
+    surucuAdi: row.surucu_adi || '',
+    archivedUri: row.archived_uri || null,
+  };
+}
 
 function mapServerResponseToFormData(data) {
   return {
@@ -97,6 +138,35 @@ function AppContent() {
   const [records, setRecords] = useState([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [isLoadingRecords, setIsLoadingRecords] = useState(true);
+
+  // Uygulama açılışında, daha önce kaydedilmiş formları Supabase'den çek.
+  // Bu sayede kayıtlar sadece bu oturumda değil, uygulama kapatılıp açılsa
+  // da (hatta başka bir cihazda) kalıcı olarak görünür.
+  useEffect(() => {
+    let isMounted = true;
+    (async () => {
+      try {
+        const { data, error } = await supabase
+          .from(SUPABASE_TABLE)
+          .select('*')
+          .order('id', { ascending: false });
+        if (error) throw error;
+        if (isMounted && data) {
+          setRecords(data.map(mapSupabaseRowToRecord));
+        }
+      } catch (error) {
+        console.error('Kayıtlar Supabase\'den yüklenemedi:', error?.message || error);
+      } finally {
+        if (isMounted) {
+          setIsLoadingRecords(false);
+        }
+      }
+    })();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const updateField = (key, value) => {
     setFormData((prev) => ({ ...prev, [key]: value }));
@@ -146,7 +216,10 @@ function AppContent() {
       const response = await axios.post(
         SERVER_ANALYZE_URL,
         { base64Image },
-        { timeout: 35000 }
+        // Render (ücretsiz katman) gibi barındırmalarda sunucu 15 dakika
+        // hareketsiz kalırsa "uyur"; ilk istek onu uyandırırken 30-50 sn
+        // sürebilir. Bu yüzden zaman aşımını cömert tutuyoruz.
+        { timeout: 60000 }
       );
 
       const payload = response.data;
@@ -163,55 +236,120 @@ function AppContent() {
       );
       setFormData(EMPTY_FORM);
       setHasResult(true);
-      Alert.alert(
-        'Sunucuya Bağlanılamadı',
-        'Bilgisayarındaki sunucuya (192.168.8.104:3000) erişilemedi. Terminalde "node server.js" komutunun açık olduğundan ve telefonunla bilgisayarının aynı Wi-Fi ağına bağlı olduğundan emin ol.'
-      );
+
+      // Sunucu gerçekten yanıt verdiyse (ör. Gemini kota hatası nedeniyle 503),
+      // bu bir bağlantı sorunu değildir; kullanıcıya sunucunun bildirdiği asıl
+      // sebebi göstermek "sunucuya bağlanılamadı" demekten çok daha doğru olur.
+      const serverMessage = error?.response?.data?.error;
+      if (serverMessage) {
+        Alert.alert('Analiz Başarısız', serverMessage);
+      } else {
+        Alert.alert(
+          'Sunucuya Bağlanılamadı',
+          `Sunucuya (${SERVER_BASE_URL}) erişilemedi. İnternet bağlantını ve sunucunun çalışır durumda olduğunu kontrol et.`
+        );
+      }
     } finally {
       setIsAnalyzing(false);
     }
   };
 
-  const archiveImage = () => {
+  // Kullanıcı orijinal (taranan kağıt) fotoğrafı değil, form alanlarının
+  // düz yazıyla göründüğü beyaz bir "sayfa" görseli istiyor. Bunu, sunucunun
+  // /form-image uç noktasından JPEG olarak alıp yerel arşiv klasörüne
+  // kaydediyoruz. Sunucuya ulaşılamazsa, en azından bir şey kaydedilmiş olsun
+  // diye orijinal fotoğrafla devam ediyoruz.
+  const generateFormImageFile = async () => {
+    const archiveDir = new Directory(Paths.document, 'otopark_arsiv');
+    if (!archiveDir.exists) {
+      archiveDir.create({ intermediates: true, idempotent: true });
+    }
+    const fileName = `${sanitizeForFileName(formData.plaka || formData.formNo)}_${timestampSuffix()}.jpeg`;
+
     try {
-      const archiveDir = new Directory(Paths.document, 'otopark_arsiv');
-      if (!archiveDir.exists) {
-        archiveDir.create({ intermediates: true, idempotent: true });
+      const response = await axios.post(
+        SERVER_FORM_IMAGE_URL,
+        { formData },
+        // Render (ücretsiz katman) uyku modundan çıkarken gecikme olabileceği
+        // için zaman aşımını /export ile aynı seviyeye çıkardık.
+        { timeout: 60000, responseType: 'arraybuffer' }
+      );
+      const bytes = new Uint8Array(response.data);
+      if (!bytes || bytes.length < 100) {
+        throw new Error('Sunucudan gelen form görseli boş/bozuk.');
       }
 
-      const fileName = `${sanitizeForFileName(formData.plaka || formData.formNo)}_${timestampSuffix()}.jpeg`;
-      const sourceFile = new File(selectedAsset.uri);
-      const destinationFile = new File(archiveDir, fileName);
-      sourceFile.copySync(destinationFile, { overwrite: true });
-      return destinationFile.uri;
-    } catch (e) {
-      return selectedAsset.uri;
+      const imageFile = new File(archiveDir, fileName);
+      if (imageFile.exists) {
+        imageFile.delete();
+      }
+      imageFile.create();
+      imageFile.write(bytes);
+      return imageFile.uri;
+    } catch (error) {
+      console.error(
+        'Form görseli oluşturulamadı, orijinal fotoğrafla devam ediliyor:',
+        error?.response?.data || error?.message || error
+      );
+      Alert.alert(
+        'Form Görseli Oluşturulamadı',
+        'Form bilgilerinden beyaz sayfa görseli oluşturulamadı (sunucuya ulaşılamamış olabilir); onun yerine orijinal fotoğraf kullanılacak.'
+      );
+
+      // Yedek plan: orijinal fotoğrafı kopyala.
+      try {
+        const sourceFile = new File(selectedAsset.uri);
+        const destinationFile = new File(archiveDir, fileName);
+        sourceFile.copySync(destinationFile, { overwrite: true });
+        return destinationFile.uri;
+      } catch (copyError) {
+        return selectedAsset.uri;
+      }
     }
   };
 
-  const saveImageToGallery = async (localUri) => {
+  // Verilen görseli önce doğrudan (sessizce) telefonun galerisine kaydetmeyi
+  // dener; Expo Go'nun Android'de tam medya kütüphanesi erişimini engellediği
+  // durumlarda (bkz. requestPermissionsAsync reddi), kullanıcının görseli
+  // manuel olarak kaydedebilmesi için sistemin paylaşım ekranına düşer.
+  const saveImageToGalleryOrShare = async (localUri, dialogTitle) => {
     try {
-      const { status } = await MediaLibrary.requestPermissionsAsync(true);
-      if (status !== 'granted') {
-        console.warn('Galeri izni verilmedi:', status);
-        return { ok: false, reason: 'İzin verilmedi.' };
+      const { status } = await MediaLibrary.requestPermissionsAsync(false, ['photo']);
+      if (status === 'granted') {
+        await MediaLibrary.createAssetAsync(localUri);
+        return;
       }
-
-      // Not: expo-media-library'nin yeni sınıf tabanlı Asset/Album API'si
-      // (Asset.create, Album.get/create) henüz yayınlanan pakette yok;
-      // bu yüzden mevcut fonksiyon tabanlı (legacy) API kullanılıyor.
-      const asset = await MediaLibrary.createAssetAsync(localUri);
-      const existingAlbum = await MediaLibrary.getAlbumAsync(GALLERY_ALBUM_NAME);
-      if (existingAlbum) {
-        await MediaLibrary.addAssetsToAlbumAsync([asset], existingAlbum, false);
-      } else {
-        await MediaLibrary.createAlbumAsync(GALLERY_ALBUM_NAME, asset, false);
-      }
-      return { ok: true };
     } catch (e) {
-      console.error('Galeriye kaydetme hatası:', e?.message || e);
-      return { ok: false, reason: e?.message || 'Bilinmeyen hata' };
+      console.warn('Galeriye doğrudan kaydetme kullanılamadı, paylaşım ekranına düşülüyor:', e?.message || e);
     }
+
+    try {
+      const canShare = await Sharing.isAvailableAsync();
+      if (canShare) {
+        await new Promise((resolve) => {
+          Alert.alert(
+            'Galeriye Kaydet',
+            'Açılacak ekrandan "Kaydet", "Dosyalara Kaydet" veya "Fotoğraflar/Galeri" seçeneğine dokunarak görseli telefonunuza .jpeg olarak kaydedebilirsiniz.',
+            [{ text: 'Devam Et', onPress: resolve }],
+            { cancelable: false }
+          );
+        });
+        await Sharing.shareAsync(localUri, { mimeType: 'image/jpeg', dialogTitle });
+      } else {
+        Alert.alert(
+          'Paylaşım Kullanılamıyor',
+          `Görsel otomatik olarak galeriye kaydedilemedi. Dosya şu konumda saklanıyor: ${localUri}`
+        );
+      }
+    } catch (e) {
+      console.error('Paylaşım ekranı açılamadı:', e?.message || e);
+    }
+  };
+
+  const archiveImage = async () => {
+    const localUri = await generateFormImageFile();
+    await saveImageToGalleryOrShare(localUri, 'Form Görselini Galeriye Kaydet / Paylaş');
+    return localUri;
   };
 
   const handleSaveRecord = async () => {
@@ -227,31 +365,54 @@ function AppContent() {
     }
 
     try {
-      const archivedUri = archiveImage();
-      const galleryResult = await saveImageToGallery(archivedUri);
+      const archivedUri = await archiveImage();
 
       const newRecord = {
         id: `${Date.now()}`,
         ...formData,
         archivedUri,
       };
+
+      const supabaseRow = mapRecordToSupabaseRow(newRecord);
+      let cloudSaveError = null;
+      try {
+        const { error } = await supabase.from(SUPABASE_TABLE).insert(supabaseRow);
+        if (error) {
+          console.error('Supabase Kayıt Hatası:', error);
+          cloudSaveError = error;
+        }
+      } catch (error) {
+        console.error('Supabase Kayıt Hatası:', error);
+        cloudSaveError = error;
+      }
+
       setRecords((prev) => [newRecord, ...prev]);
       setSelectedAsset(null);
       setFormData(EMPTY_FORM);
       setHasResult(false);
-      Alert.alert(
-        'Başarılı',
-        galleryResult.ok
-          ? `Form listeye eklendi ve fotoğraf telefonunuzun galerisine "${GALLERY_ALBUM_NAME}" albümüne .jpeg olarak kaydedildi.`
-          : `Form listeye eklendi ancak fotoğraf galeriye kaydedilemedi: ${galleryResult.reason}`
-      );
+
+      if (cloudSaveError) {
+        Alert.alert('Supabase Hatası', cloudSaveError.message);
+      } else {
+        Alert.alert('Başarılı', 'Form başarıyla arşivlendi, listeye eklendi ve buluta kaydedildi!');
+      }
     } catch (error) {
       Alert.alert('Hata', 'Form kaydedilirken bir sorun oluştu: ' + error.message);
     }
   };
 
-  const handleDeleteRecord = (id) => {
+  const handleDeleteRecord = async (id) => {
     setRecords((prev) => prev.filter((record) => record.id !== id));
+    try {
+      const { error } = await supabase.from(SUPABASE_TABLE).delete().eq('id', Number(id));
+      if (error) throw error;
+    } catch (error) {
+      console.error('Kayıt Supabase\'den silinemedi:', error?.message || error);
+      Alert.alert(
+        'Bulut Silme Başarısız',
+        'Kayıt listeden kaldırıldı ancak Supabase\'den silinemedi: ' + (error?.message || 'Bilinmeyen hata')
+      );
+    }
   };
 
   const handleExportExcel = async () => {
@@ -412,7 +573,9 @@ function AppContent() {
             <Text style={styles.cardTitle}>
               3. Kaydedilen Formlar ({records.length})
             </Text>
-            {records.length === 0 ? (
+            {isLoadingRecords ? (
+              <ActivityIndicator color="#4F46E5" style={{ marginVertical: 12 }} />
+            ) : records.length === 0 ? (
               <Text style={styles.cardHint}>Henüz kaydedilmiş form yok.</Text>
             ) : (
               records.map((record) => (

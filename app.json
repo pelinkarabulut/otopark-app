@@ -7,7 +7,8 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.pelinkarabulut.otoparkapp"
     },
     "android": {
       "adaptiveIcon": {
@@ -15,7 +16,14 @@
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
-      }
+      },
+      "permissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.READ_MEDIA_IMAGES"
+      ],
+      "package": "com.pelinkarabulut.otoparkapp"
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -26,9 +34,17 @@
         {
           "photosPermission": "Arşivlenen form fotoğraflarını galerinize kaydedebilmek için fotoğraf erişimine ihtiyaç var.",
           "savePhotosPermission": "Arşivlenen form fotoğraflarını galerinize .jpeg olarak kaydedebilmek için izin gerekiyor.",
-          "isAccessMediaLocationEnabled": false
+          "isAccessMediaLocationEnabled": false,
+          "granularPermissions": [
+            "photo"
+          ]
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "98514e04-016b-4957-a483-0ce66ee36083"
+      }
+    }
   }
 }
