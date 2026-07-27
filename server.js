@@ -97,19 +97,37 @@ if (!googleCredentials) {
     '⚠️  Google Sheets kimlik bilgisi bulunamadı (google-credentials.json veya ' +
       'GOOGLE_SERVICE_ACCOUNT_JSON). /append-to-sheet uç noktası çalışmayacak.'
   );
+} else {
+  console.log(
+    `[Sheets] Kimlik bilgisi yüklendi. Kaynak: ${
+      process.env.GOOGLE_SERVICE_ACCOUNT_JSON ? 'GOOGLE_SERVICE_ACCOUNT_JSON (env)' : 'google-credentials.json (dosya)'
+    }, service account e-postası: ${googleCredentials.client_email || 'BİLİNMİYOR'}`
+  );
 }
 
 let sheetsClientPromise = null;
 function getSheetsClient() {
-  if (!googleCredentials) return null;
+  if (!googleCredentials) {
+    console.error('[Sheets] getSheetsClient: googleCredentials tanımsız, client oluşturulamıyor.');
+    return null;
+  }
   if (!sheetsClientPromise) {
+    console.log('[Sheets] Google auth client ilk kez oluşturuluyor...');
     const auth = new google.auth.GoogleAuth({
       credentials: googleCredentials,
       scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     });
     sheetsClientPromise = auth
       .getClient()
-      .then((authClient) => google.sheets({ version: 'v4', auth: authClient }));
+      .then((authClient) => {
+        console.log('[Sheets] Google auth client başarıyla oluşturuldu.');
+        return google.sheets({ version: 'v4', auth: authClient });
+      })
+      .catch((error) => {
+        console.error('[Sheets] Google auth client OLUŞTURULAMADI:', error?.message || error);
+        sheetsClientPromise = null; // Bir sonraki denemede tekrar dene.
+        throw error;
+      });
   }
   return sheetsClientPromise;
 }
@@ -120,13 +138,20 @@ function getSheetsClient() {
 // yok).
 let cachedSheetTitle = null;
 async function getTargetSheetTitle(sheets) {
-  if (cachedSheetTitle) return cachedSheetTitle;
+  if (cachedSheetTitle) {
+    console.log(`[Sheets] Önbellekteki sayfa adı kullanılıyor: "${cachedSheetTitle}"`);
+    return cachedSheetTitle;
+  }
+  console.log(`[Sheets] spreadsheetId=${GOOGLE_SHEET_ID} için sayfa (gid=${GOOGLE_SHEET_GID}) metadata sorgulanıyor...`);
   const meta = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
+  const allSheets = meta.data.sheets?.map((s) => ({ title: s.properties?.title, sheetId: s.properties?.sheetId }));
+  console.log('[Sheets] Tablodaki tüm sayfalar:', JSON.stringify(allSheets));
   const match = meta.data.sheets?.find((s) => s.properties?.sheetId === GOOGLE_SHEET_GID);
   if (!match) {
     throw new Error(`Google E-Tabloda gid=${GOOGLE_SHEET_GID} olan bir sayfa bulunamadı.`);
   }
   cachedSheetTitle = match.properties.title;
+  console.log(`[Sheets] Hedef sayfa bulundu: "${cachedSheetTitle}"`);
   return cachedSheetTitle;
 }
 
@@ -172,6 +197,8 @@ function buildGoogleSheetRow(record, nextId) {
 }
 
 async function appendRecordToGoogleSheet(record) {
+  console.log('[Sheets] appendRecordToGoogleSheet çağrıldı. Gelen record:', JSON.stringify(record));
+
   const sheets = await getSheetsClient();
   if (!sheets) {
     throw new Error(
@@ -184,6 +211,7 @@ async function appendRecordToGoogleSheet(record) {
 
   // Yeni satırın ID'sini belirlemek için mevcut A sütununu (başlık satırı
   // hariç) okuyup en büyük sayısal değeri buluyoruz.
+  console.log(`[Sheets] "${title}!A2:A" aralığı okunuyor (mevcut ID'leri bulmak için)...`);
   const existing = await sheets.spreadsheets.values.get({
     spreadsheetId: GOOGLE_SHEET_ID,
     range: `${title}!A2:A`,
@@ -193,19 +221,22 @@ async function appendRecordToGoogleSheet(record) {
     const num = Number(value);
     return Number.isFinite(num) && num > max ? num : max;
   }, 0);
+  console.log(`[Sheets] Mevcut satır sayısı: ${idColumn.length}, bulunan en büyük ID: ${maxId}, yeni ID: ${maxId + 1}`);
 
   const row = buildGoogleSheetRow(record, maxId + 1);
+  console.log('[Sheets] Eklenecek satır:', JSON.stringify(row));
 
   // A:T = 20 sütun (A,B,...,T). insertDataOption INSERT_ROWS sayesinde,
   // aralıkta zaten veri olsa bile satır her zaman tablonun EN ALTINA
   // eklenir, mevcut veriler asla üzerine yazılmaz/silinmez.
-  await sheets.spreadsheets.values.append({
+  const appendResult = await sheets.spreadsheets.values.append({
     spreadsheetId: GOOGLE_SHEET_ID,
     range: `${title}!A:T`,
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
     requestBody: { values: [row] },
   });
+  console.log('[Sheets] append API yanıtı:', JSON.stringify(appendResult.data));
 
   return { sheetTitle: title, rowId: maxId + 1 };
 }
@@ -223,19 +254,33 @@ const sheetAppendLimiter = rateLimit({
 
 // 4. GOOGLE E-TABLOSUNA SATIR EKLEME ENDPOINT'I
 app.post('/append-to-sheet', sheetAppendLimiter, async (req, res) => {
+  console.log('\n========== [Sheets] /append-to-sheet isteği alındı ==========');
+  console.log('[Sheets] İstek zamanı:', new Date().toISOString());
+  console.log('[Sheets] İstek body (ham):', JSON.stringify(req.body));
   try {
     const { record } = req.body;
     if (!record || typeof record !== 'object') {
+      console.error('[Sheets] Geçersiz istek: record alanı eksik veya obje değil.');
       return res.status(400).json({ success: false, error: 'record alanı eksik.' });
     }
 
     const result = await appendRecordToGoogleSheet(record);
-    console.log(`✅ Google E-Tablo'ya satır eklendi: "${result.sheetTitle}" sayfası, ID=${result.rowId}`);
+    console.log(`✅ [Sheets] Google E-Tablo'ya satır eklendi: "${result.sheetTitle}" sayfası, ID=${result.rowId}`);
     res.json({ success: true, ...result });
   } catch (error) {
+    // Google API hataları genelde error.response.data içinde detaylı bilgi taşır;
+    // bunu eksiksiz loglayarak (kota, izin, yanlış sheet ID/gid, vb.) kök nedeni
+    // terminalden doğrudan görebilmeyi amaçlıyoruz.
+    console.error('[Sheets] ❌ HATA OLUŞTU');
+    console.error('[Sheets] error.message:', error.message);
+    console.error('[Sheets] error.response?.status:', error?.response?.status);
+    console.error('[Sheets] error.response?.data (tam):', JSON.stringify(error?.response?.data, null, 2));
+    console.error('[Sheets] error.stack:', error.stack);
+
     const details = error?.response?.data?.error?.message || error.message;
-    console.error("Google E-Tablo'ya satır eklenemedi:", details);
     res.status(500).json({ success: false, error: "Google E-Tablo'ya yazılamadı: " + details });
+  } finally {
+    console.log('========== [Sheets] /append-to-sheet isteği tamamlandı ==========\n');
   }
 });
 
