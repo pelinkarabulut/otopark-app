@@ -417,55 +417,98 @@ function AppContent() {
       return;
     }
 
+    // Not: Aşağıdaki 3 adım (arşivleme, Supabase, Google E-Tablo) BİLEREK 3 AYRI
+    // try/catch bloğuna ayrıldı. Böylece herhangi biri (ör. galeriye kaydetme
+    // izni sorunu ya da Supabase hatası) patlarsa, diğer ikisi YİNE DE
+    // çalışmaya devam eder — eskiden hepsi TEK bir try/catch içindeyken, en
+    // baştaki archiveImage() hata fırlatırsa Supabase'e VE Google E-Tablo'ya
+    // hiç istek atılmıyordu.
+
+    // 1) Fotoğrafı/form görselini arşivle. Başarısız olursa akışı DURDURMUYORUZ;
+    // en azından Supabase ve Google E-Tablo kaydı denensin diye archivedUri'yi
+    // boş bırakıp devam ediyoruz.
+    let archivedUri = null;
     try {
-      const archivedUri = await archiveImage();
+      archivedUri = await archiveImage();
+    } catch (archiveError) {
+      console.error('Arşivleme hatası (Supabase/Sheets kaydı yine de denenecek):', archiveError?.message || archiveError);
+      Alert.alert(
+        'Arşivleme Uyarısı',
+        'Form görseli telefona kaydedilemedi ancak form verisi buluta kaydedilmeye devam edilecek: ' +
+          (archiveError?.message || 'Bilinmeyen hata')
+      );
+    }
 
-      const newRecord = {
-        id: `${Date.now()}`,
-        ...formData,
-        archivedUri,
-      };
+    const newRecord = {
+      id: `${Date.now()}`,
+      ...formData,
+      archivedUri,
+    };
 
-      const supabaseRow = mapRecordToSupabaseRow(newRecord);
-      let cloudSaveError = null;
-      try {
-        const { error } = await supabase.from(SUPABASE_TABLE).insert(supabaseRow);
-        if (error) {
-          console.error('Supabase Kayıt Hatası:', error);
-          cloudSaveError = error;
-        }
-      } catch (error) {
+    // 2) Supabase'e kaydet.
+    const supabaseRow = mapRecordToSupabaseRow(newRecord);
+    let cloudSaveError = null;
+    try {
+      const { error } = await supabase.from(SUPABASE_TABLE).insert(supabaseRow);
+      if (error) {
         console.error('Supabase Kayıt Hatası:', error);
         cloudSaveError = error;
       }
-
-      setRecords((prev) => [newRecord, ...prev]);
-      setSelectedAsset(null);
-      setFormData(EMPTY_FORM);
-      setHasResult(false);
-
-      if (cloudSaveError) {
-        Alert.alert('Supabase Hatası', cloudSaveError.message);
-      } else {
-        Alert.alert('Başarılı', 'Form başarıyla arşivlendi, listeye eklendi ve buluta kaydedildi!');
-      }
-
-      // Google E-Tablo'ya kaydetmeyi "best-effort" olarak dene; burada oluşacak
-      // bir hata Supabase/yerel kaydı geri almaz, sadece ayrı bir uyarı gösterir.
-      try {
-        await axios.post(SERVER_APPEND_SHEET_URL, { record: newRecord }, { timeout: 30000 });
-        console.log("Google E-Tablo'ya başarıyla eklendi.");
-      } catch (sheetsError) {
-        const sheetsErrorMessage =
-          sheetsError?.response?.data?.error || sheetsError.message || 'Bilinmeyen hata';
-        console.warn("Google E-Tablo'ya eklenirken hata oluştu:", sheetsErrorMessage);
-        Alert.alert(
-          'Google E-Tablo Hatası',
-          'Form Supabase\'e kaydedildi ancak Google E-Tablo\'ya eklenemedi: ' + sheetsErrorMessage
-        );
-      }
     } catch (error) {
-      Alert.alert('Hata', 'Form kaydedilirken bir sorun oluştu: ' + error.message);
+      console.error('Supabase Kayıt Hatası:', error);
+      cloudSaveError = error;
+    }
+
+    setRecords((prev) => [newRecord, ...prev]);
+    setSelectedAsset(null);
+    setFormData(EMPTY_FORM);
+    setHasResult(false);
+
+    if (cloudSaveError) {
+      Alert.alert('Supabase Hatası', cloudSaveError.message);
+    } else {
+      Alert.alert('Başarılı', 'Form başarıyla arşivlendi, listeye eklendi ve buluta kaydedildi!');
+    }
+
+    // 3) Google E-Tablo'ya kaydet. Supabase adımı ne olursa olsun (başarılı ya
+    // da başarısız) BURAYA HER ZAMAN GİRİLİR; ayrı bir try/catch'te olduğu için
+    // yukarıdaki adımlardan bağımsızdır.
+    console.log(
+      `[Sheets-Client] /append-to-sheet isteği gönderiliyor -> URL: ${SERVER_APPEND_SHEET_URL}, record.id: ${newRecord.id}`
+    );
+    try {
+      const sheetResponse = await axios.post(
+        SERVER_APPEND_SHEET_URL,
+        { record: newRecord },
+        { timeout: 30000 }
+      );
+      console.log(
+        `[Sheets-Client] Google E-Tablo'ya başarıyla eklendi. Sunucu yanıtı:`,
+        JSON.stringify(sheetResponse.data)
+      );
+    } catch (sheetsError) {
+      // Ağ hatası (sunucuya hiç ulaşılamadı) ile sunucunun döndürdüğü hatayı
+      // (ör. yanlış sheet/gid, kimlik bilgisi eksik) ayırt ederek logluyoruz.
+      if (sheetsError.response) {
+        console.error(
+          `[Sheets-Client] Sunucu HATA döndürdü. status=${sheetsError.response.status}, body=`,
+          JSON.stringify(sheetsError.response.data)
+        );
+      } else if (sheetsError.request) {
+        console.error(
+          '[Sheets-Client] İstek gönderildi ama sunucudan hiç yanıt alınamadı (ağ/zaman aşımı sorunu):',
+          sheetsError.message
+        );
+      } else {
+        console.error('[Sheets-Client] İstek oluşturulurken hata oluştu:', sheetsError.message);
+      }
+
+      const sheetsErrorMessage =
+        sheetsError?.response?.data?.error || sheetsError.message || 'Bilinmeyen hata';
+      Alert.alert(
+        'Google E-Tablo Hatası',
+        'Form Supabase\'e kaydedildi ancak Google E-Tablo\'ya eklenemedi: ' + sheetsErrorMessage
+      );
     }
   };
 
