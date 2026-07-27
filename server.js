@@ -28,6 +28,15 @@ function loadDotEnv() {
 loadDotEnv();
 
 const app = express();
+
+// Render.com gibi platformlar istekleri bir ters proxy (reverse proxy)
+// arkasından iletir ve X-Forwarded-For başlığı ekler. express-rate-limit,
+// "trust proxy" ayarlanmadan bu başlığı gördüğünde güvenlik amacıyla hata
+// fırlatıp sunucuyu çökertiyor (ERR_ERL_UNEXPECTED_X_FORWARDED_FOR). Render
+// tek bir güvenilir proxy katmanı kullandığı için "1" değeri doğru ve güvenli
+// bir ayardır (Express'e yalnızca en yakın proxy'ye güvenmesini söyler).
+app.set('trust proxy', 1);
+
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
