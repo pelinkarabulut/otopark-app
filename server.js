@@ -365,13 +365,39 @@ function summarizeGeminiError(error) {
   return error?.message ? error.message.split('\n')[0].slice(0, 160) : 'Bilinmeyen hata';
 }
 
+// Gemini bazen "SADECE JSON yaz" talimatına uymayıp JSON'un öncesine/sonrasına
+// açıklama cümlesi ya da ```json bloğu ekleyebiliyor. Bu durumda düz
+// JSON.parse başarısız olur ve bu (kotayla ilgisi olmayan) hata yanlışlıkla
+// "hiçbir model çalışmadı" genel mesajına yol açardı. Burada önce markdown
+// bloklarını temizleyip deniyoruz; o da başarısız olursa metindeki ilk "{" ile
+// son "}" arasını çıkarıp tekrar deniyoruz.
+function extractJsonFromModelResponse(responseText) {
+  const withoutFences = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
+  try {
+    return JSON.parse(withoutFences);
+  } catch (firstError) {
+    const start = withoutFences.indexOf('{');
+    const end = withoutFences.lastIndexOf('}');
+    if (start !== -1 && end !== -1 && end > start) {
+      const candidate = withoutFences.slice(start, end + 1);
+      return JSON.parse(candidate); // Başarısız olursa hatayı yukarı fırlatsın.
+    }
+    throw firstError;
+  }
+}
+
 // 1. GÖRSEL ANALİZ ENDPOINT'I
 app.post('/analyze', enforceDailyAnalyzeLimit, analyzeLimiter, async (req, res) => {
+  console.log('\n========== [Analyze] /analyze isteği alındı ==========');
+  console.log('[Analyze] İstek zamanı:', new Date().toISOString());
+
   const { base64Image } = req.body;
 
   if (!base64Image) {
+    console.error('[Analyze] Geçersiz istek: base64Image alanı eksik.');
     return res.status(400).json({ success: false, error: 'base64Image alanı eksik.' });
   }
+  console.log(`[Analyze] Gelen görsel boyutu (base64): ~${Math.round((base64Image.length * 0.75) / 1024)} KB`);
 
   const prompt = `Bu bir otopark araç görev formudur. Görseldeki el yazısı verilerini oku ve SADECE aşağıdaki JSON formatında yanıt ver. Ekstra hiçbir açıklama veya markdown bloğu yazma:
     {
@@ -398,22 +424,35 @@ app.post('/analyze', enforceDailyAnalyzeLimit, analyzeLimiter, async (req, res) 
   let lastError = null;
   let allQuotaExceeded = true;
   for (const modelName of GEMINI_MODEL_CANDIDATES) {
+    console.log(`[Analyze] "${modelName}" modeli deneniyor...`);
     try {
       const model = genAI.getGenerativeModel({ model: modelName });
       const result = await model.generateContent([prompt, ...imageParts]);
       const responseText = result.response.text();
+      console.log(`[Analyze] "${modelName}" ham yanıt (ilk 500 karakter):`, responseText.slice(0, 500));
 
-      const cleanJson = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
-      const data = JSON.parse(cleanJson);
+      let data;
+      try {
+        data = extractJsonFromModelResponse(responseText);
+      } catch (parseError) {
+        console.error(`[Analyze] "${modelName}" JSON PARSE HATASI: ${parseError.message}`);
+        console.error(`[Analyze] "${modelName}" parse edilemeyen tam yanıt:`, responseText);
+        // JSON parse hatası kota ile ilgili değildir; bunu ayrı bir "quota
+        // değil" sebep olarak işaretleyip bir sonraki modeli deniyoruz.
+        allQuotaExceeded = false;
+        lastError = parseError;
+        continue;
+      }
 
-      console.log(`✅ "${modelName}" modeliyle başarıyla analiz edildi.`);
+      console.log(`✅ [Analyze] "${modelName}" modeliyle başarıyla analiz edildi. Çıkarılan veri:`, JSON.stringify(data));
       return res.json({ success: true, data, model: modelName });
     } catch (error) {
       const status = error?.status || error?.response?.status;
+      console.error(`[Analyze] "${modelName}" API HATASI. status=${status}, message=${error?.message}`);
       if (status !== 429) {
         allQuotaExceeded = false;
       }
-      console.warn(`⚠️  "${modelName}" başarısız: ${summarizeGeminiError(error)}`);
+      console.warn(`⚠️  [Analyze] "${modelName}" başarısız: ${summarizeGeminiError(error)}`);
       lastError = error;
     }
   }
@@ -422,7 +461,8 @@ app.post('/analyze', enforceDailyAnalyzeLimit, analyzeLimiter, async (req, res) 
     ? 'Ücretsiz Gemini API kullanım kotanız doldu (günlük/dakikalık istek sınırı aşıldı). Lütfen birkaç dakika sonra ya da yarın tekrar deneyin, veya Google AI Studio üzerinden ücretli bir plana geçin.'
     : 'Hiçbir Gemini modeli görseli analiz edemedi. Lütfen tekrar deneyin.';
 
-  console.warn(`Sunucu: Hiçbir Gemini modeli çalışmadı. Son hata: ${summarizeGeminiError(lastError)}`);
+  console.warn(`[Analyze] Sunucu: Hiçbir Gemini modeli çalışmadı. Son hata: ${summarizeGeminiError(lastError)}`);
+  console.log('========== [Analyze] /analyze isteği tamamlandı (başarısız) ==========\n');
   res.status(503).json({ success: false, error: friendlyMessage });
 });
 
