@@ -197,7 +197,9 @@ function buildGoogleSheetRow(record, nextId) {
 }
 
 async function appendRecordToGoogleSheet(record) {
-  console.log('[Sheets] appendRecordToGoogleSheet çağrıldı. Gelen record:', JSON.stringify(record));
+  console.log('[Sheets] appendRecordToGoogleSheet çağrıldı.');
+  console.log(`[Sheets] Hedef: spreadsheetId=${GOOGLE_SHEET_ID}, gid=${GOOGLE_SHEET_GID}`);
+  console.log('[Sheets] Gelen record:', JSON.stringify(record));
 
   const sheets = await getSheetsClient();
   if (!sheets) {
@@ -208,37 +210,83 @@ async function appendRecordToGoogleSheet(record) {
   }
 
   const title = await getTargetSheetTitle(sheets);
+  console.log(`[Sheets] Yazılacak çalışma sayfası (gid=${GOOGLE_SHEET_GID} eşleşmesi): "${title}"`);
 
-  // Yeni satırın ID'sini belirlemek için mevcut A sütununu (başlık satırı
-  // hariç) okuyup en büyük sayısal değeri buluyoruz.
-  console.log(`[Sheets] "${title}!A2:A" aralığı okunuyor (mevcut ID'leri bulmak için)...`);
+  // "values.append" API'sinin kendi tablo-sonu tespiti, sayfada araya serpiştirilmiş
+  // boş satırlar varsa şaşırabiliyor (yanlış satırdan sonra ekleyebiliyor). Bunun
+  // önüne geçmek için A sütununun TAMAMINI (başlıktan sona kadar) okuyup:
+  //   1) Gerçekten veri içeren EN SON satırı kendimiz buluyoruz (boş satırları
+  //      atlayarak; A sütunu boş ama başka bir sütun dolu olan satırları da
+  //      kaçırmamak için A:T aralığının tamamını tarıyoruz),
+  //   2) Yeni satırı bu satırın HEMEN ALTINA, "values.update" ile TAM OLARAK
+  //      belirlediğimiz satır numarasına yazıyoruz (append'in "otomatik" tahminine
+  //      güvenmek yerine).
+  console.log(`[Sheets] "${title}!A:T" aralığının tamamı okunuyor (gerçek son dolu satırı bulmak için)...`);
   const existing = await sheets.spreadsheets.values.get({
     spreadsheetId: GOOGLE_SHEET_ID,
-    range: `${title}!A2:A`,
+    range: `${title}!A:T`,
   });
-  const idColumn = existing.data.values || [];
-  const maxId = idColumn.reduce((max, [value]) => {
-    const num = Number(value);
+  const allRows = existing.data.values || [];
+  console.log(`[Sheets] Sayfada toplam okunan satır sayısı (başlık dahil): ${allRows.length}`);
+
+  // Sondan başa doğru tarayıp, herhangi bir hücresi dolu olan İLK satırı
+  // buluyoruz; bu bize "gerçek son dolu satır"ı verir (araya serpiştirilmiş
+  // boş satırlar varsa bile en sona doğru olanlar tamamen boşsa atlanır).
+  let lastNonEmptyRowIndex = 0; // 0 = sadece başlık satırı var / hiç veri yok
+  for (let i = allRows.length - 1; i >= 0; i -= 1) {
+    const row = allRows[i] || [];
+    const hasAnyValue = row.some((cell) => cell !== undefined && cell !== null && String(cell).trim() !== '');
+    if (hasAnyValue) {
+      lastNonEmptyRowIndex = i + 1; // 1-tabanlı satır numarası (Sheets satırları 1'den başlar)
+      break;
+    }
+  }
+  if (lastNonEmptyRowIndex === 0) {
+    lastNonEmptyRowIndex = 1; // Sayfada hiç veri yoksa başlık satırının kendisi (1) kabul edilir.
+  }
+  const targetRow = lastNonEmptyRowIndex + 1;
+  console.log(`[Sheets] Gerçek son dolu satır: ${lastNonEmptyRowIndex}. Yeni veri şu satıra yazılacak: ${targetRow}`);
+
+  // Yeni ID'yi, A sütunundaki (başlık hariç) TÜM değerler arasından en büyük
+  // sayısal değeri bularak belirliyoruz; boş/sayısal olmayan hücreler
+  // (Number.isFinite kontrolü sayesinde) otomatik atlanır.
+  const maxId = allRows.slice(1).reduce((max, row) => {
+    const num = Number(row?.[0]);
     return Number.isFinite(num) && num > max ? num : max;
   }, 0);
-  console.log(`[Sheets] Mevcut satır sayısı: ${idColumn.length}, bulunan en büyük ID: ${maxId}, yeni ID: ${maxId + 1}`);
+  const nextId = maxId + 1;
+  console.log(`[Sheets] Bulunan en büyük ID: ${maxId}, yeni ID: ${nextId}`);
 
-  const row = buildGoogleSheetRow(record, maxId + 1);
-  console.log('[Sheets] Eklenecek satır:', JSON.stringify(row));
+  const row = buildGoogleSheetRow(record, nextId);
+  console.log('[Sheets] Eklenecek satır verisi:', JSON.stringify(row));
 
-  // A:T = 20 sütun (A,B,...,T). insertDataOption INSERT_ROWS sayesinde,
-  // aralıkta zaten veri olsa bile satır her zaman tablonun EN ALTINA
-  // eklenir, mevcut veriler asla üzerine yazılmaz/silinmez.
-  const appendResult = await sheets.spreadsheets.values.append({
+  const targetRange = `${title}!A${targetRow}:T${targetRow}`;
+  console.log(`[Sheets] "${targetRange}" aralığına values.update ile yazılıyor...`);
+  const updateResult = await sheets.spreadsheets.values.update({
     spreadsheetId: GOOGLE_SHEET_ID,
-    range: `${title}!A:T`,
+    range: targetRange,
     valueInputOption: 'USER_ENTERED',
-    insertDataOption: 'INSERT_ROWS',
     requestBody: { values: [row] },
   });
-  console.log('[Sheets] append API yanıtı:', JSON.stringify(appendResult.data));
+  console.log('[Sheets] update API yanıtı:', JSON.stringify(updateResult.data));
 
-  return { sheetTitle: title, rowId: maxId + 1 };
+  // Doğrulama: az önce yazdığımız satırı geri okuyup gerçekten orada olduğunu
+  // teyit ediyoruz. Bu, "başarılı" dönüp aslında yazılmamış olma ihtimalini
+  // (ör. yanlış sayfa/aralık) loglardan hemen fark etmemizi sağlar.
+  const verifyResult = await sheets.spreadsheets.values.get({
+    spreadsheetId: GOOGLE_SHEET_ID,
+    range: targetRange,
+  });
+  console.log(`[Sheets] DOĞRULAMA - "${targetRange}" geri okundu:`, JSON.stringify(verifyResult.data.values));
+  const wasWritten = (verifyResult.data.values || []).length > 0;
+  if (!wasWritten) {
+    throw new Error(
+      `Satır yazıldı gibi görünüyor ama doğrulama okumasında "${targetRange}" boş döndü. ` +
+        'Yanlış sayfaya/aralığa yazılmış olabilir.'
+    );
+  }
+
+  return { sheetTitle: title, rowId: nextId, writtenRange: updateResult.data.updatedRange || targetRange };
 }
 
 const sheetAppendLimiter = rateLimit({
@@ -265,7 +313,9 @@ app.post('/append-to-sheet', sheetAppendLimiter, async (req, res) => {
     }
 
     const result = await appendRecordToGoogleSheet(record);
-    console.log(`✅ [Sheets] Google E-Tablo'ya satır eklendi: "${result.sheetTitle}" sayfası, ID=${result.rowId}`);
+    console.log(
+      `✅ [Sheets] Google E-Tablo'ya satır eklendi: "${result.sheetTitle}" sayfası, ID=${result.rowId}, aralık=${result.writtenRange}`
+    );
     res.json({ success: true, ...result });
   } catch (error) {
     // Google API hataları genelde error.response.data içinde detaylı bilgi taşır;
