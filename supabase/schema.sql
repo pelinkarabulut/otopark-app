@@ -20,11 +20,17 @@ create table if not exists public.otopark_formlari (
 
 -- Row Level Security açık; uygulamada henüz kullanıcı girişi (auth) olmadığı
 -- için şimdilik herkese (anon anahtarla) tam erişim veren geçici bir politika
--- tanımlanıyor. İleride auth eklenirse bu politikayı kullanıcı bazlı
--- (ör. "auth.uid() = user_id") bir kurala göre sıkılaştırın.
+-- tanımlanıyor. Bu sayede uygulama içindeki "Sil" butonu da dahil tüm
+-- işlemler (SELECT/INSERT/UPDATE/DELETE) çalışır durumda kalır.
+-- GÜVENLİK NOTU: Bu politika anon rolüne (yani uygulamanın gömülü
+-- anahtarına) sınırsız erişim veriyor; ileride kullanıcı girişi (auth)
+-- eklendiğinde bu politikayı kullanıcı bazlı (ör. "auth.uid() = user_id")
+-- bir kurala göre sıkılaştırın.
 alter table public.otopark_formlari enable row level security;
 
 drop policy if exists "Gecici: anon tam erisim" on public.otopark_formlari;
+drop policy if exists "anon_select_otopark_formlari" on public.otopark_formlari;
+drop policy if exists "anon_insert_otopark_formlari" on public.otopark_formlari;
 create policy "Gecici: anon tam erisim"
   on public.otopark_formlari
   for all

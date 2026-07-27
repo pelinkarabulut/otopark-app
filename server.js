@@ -47,6 +47,189 @@ if (!GEMINI_API_KEY) {
 }
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
+// --- Google E-Tablolar (Sheets) Entegrasyonu ---
+// Her form kaydedildiğinde, kullanıcının kendi Google E-Tablosuna yeni bir
+// satır ekleniyor. Kimlik bilgileri iki şekilde sağlanabilir:
+//   1) Production (Render vb.): google-credentials.json dosyası git'e
+//      gitmediği için, servis hesabı JSON anahtarının TAMAMI tek satırlık
+//      bir JSON string olarak GOOGLE_SERVICE_ACCOUNT_JSON ortam değişkenine
+//      yazılır.
+//   2) Yerel geliştirme: proje kök dizinindeki google-credentials.json
+//      dosyası doğrudan okunur.
+const { google } = require('googleapis');
+
+const GOOGLE_SHEET_ID = '1oayZw4t8PQWOEJ-AuWfbkrXyYYeT4sOIKVOGCM2QOqg';
+const GOOGLE_SHEET_GID = 1348369888;
+
+function loadGoogleCredentials() {
+  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+    try {
+      return JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+    } catch (error) {
+      console.error('GOOGLE_SERVICE_ACCOUNT_JSON çözümlenemedi (geçerli JSON değil):', error.message);
+      return null;
+    }
+  }
+  const localPath = path.join(__dirname, 'google-credentials.json');
+  if (fs.existsSync(localPath)) {
+    try {
+      return JSON.parse(fs.readFileSync(localPath, 'utf8'));
+    } catch (error) {
+      console.error('google-credentials.json okunamadı/parse edilemedi:', error.message);
+      return null;
+    }
+  }
+  return null;
+}
+
+const googleCredentials = loadGoogleCredentials();
+if (!googleCredentials) {
+  console.warn(
+    '⚠️  Google Sheets kimlik bilgisi bulunamadı (google-credentials.json veya ' +
+      'GOOGLE_SERVICE_ACCOUNT_JSON). /append-to-sheet uç noktası çalışmayacak.'
+  );
+}
+
+let sheetsClientPromise = null;
+function getSheetsClient() {
+  if (!googleCredentials) return null;
+  if (!sheetsClientPromise) {
+    const auth = new google.auth.GoogleAuth({
+      credentials: googleCredentials,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+    sheetsClientPromise = auth
+      .getClient()
+      .then((authClient) => google.sheets({ version: 'v4', auth: authClient }));
+  }
+  return sheetsClientPromise;
+}
+
+// gid, sayfanın URL'deki numarası; Sheets API ise A1 aralıklarında sayfa
+// ADINI (title) ister. Bu yüzden ilk istekte gid -> title eşlemesini bulup
+// önbelleğe alıyoruz (sayfa adı değişmediği sürece tekrar sorgulamaya gerek
+// yok).
+let cachedSheetTitle = null;
+async function getTargetSheetTitle(sheets) {
+  if (cachedSheetTitle) return cachedSheetTitle;
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
+  const match = meta.data.sheets?.find((s) => s.properties?.sheetId === GOOGLE_SHEET_GID);
+  if (!match) {
+    throw new Error(`Google E-Tabloda gid=${GOOGLE_SHEET_GID} olan bir sayfa bulunamadı.`);
+  }
+  cachedSheetTitle = match.properties.title;
+  return cachedSheetTitle;
+}
+
+function formatDateTimeTR(date) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+// Google E-Tablo Satır Dizilimi (kullanıcı tarafından onaylanan, 20 sütunluk
+// sıra): ID, BAŞLANGIC SAATİ, TAMAMLANMA SAATİ, EPOSTA, AD,
+// FORM NUMARASI GİRİNİZ, SÜTUN1, ARACIN ÇIKIŞ TARİHİ, PLAKA GİRİNİZ,
+// SÜRÜCÜNÜN ADI SOYADI, ARAÇ İSTEĞİNDE BULUNAN DEPARTMANI GİRİNİZ,
+// ARACIN KULLANIM AMACINI GİRİNİZ, ÇIKIŞ KM GİRİNİZ, ÇIKIŞ SAATİNİ GİRİNİZ,
+// DÖNÜŞ KM GİRİNİZ, DÖNÜŞ SAATİNİ GİRİNİZ, ARACIN DÖNÜŞ TARİHİ,
+// TALEP KANALI (boş), TALEP TARİHİ (boş), SORU (boş).
+function buildGoogleSheetRow(record, nextId) {
+  const createdAtMs = Number(record.id);
+  const createdAt = Number.isFinite(createdAtMs) ? new Date(createdAtMs) : new Date();
+  const formattedDateTime = formatDateTimeTR(createdAt);
+
+  return [
+    nextId,
+    formattedDateTime,
+    formattedDateTime,
+    'anonymous',
+    '',
+    record.formNo || '',
+    '',
+    record.cikisTarihi || '',
+    record.plaka || '',
+    record.surucuAdi || '',
+    record.bolum || '',
+    record.gorev || '',
+    record.cikisKm || '',
+    record.cikisSaati || '',
+    record.donusKm || '',
+    record.donusSaati || '',
+    record.donusTarihi || '',
+    '',
+    '',
+    '',
+  ];
+}
+
+async function appendRecordToGoogleSheet(record) {
+  const sheets = await getSheetsClient();
+  if (!sheets) {
+    throw new Error(
+      'Google Sheets kimlik bilgileri yapılandırılmadı (GOOGLE_SERVICE_ACCOUNT_JSON ortam ' +
+        'değişkeni veya google-credentials.json dosyası bulunamadı).'
+    );
+  }
+
+  const title = await getTargetSheetTitle(sheets);
+
+  // Yeni satırın ID'sini belirlemek için mevcut A sütununu (başlık satırı
+  // hariç) okuyup en büyük sayısal değeri buluyoruz.
+  const existing = await sheets.spreadsheets.values.get({
+    spreadsheetId: GOOGLE_SHEET_ID,
+    range: `${title}!A2:A`,
+  });
+  const idColumn = existing.data.values || [];
+  const maxId = idColumn.reduce((max, [value]) => {
+    const num = Number(value);
+    return Number.isFinite(num) && num > max ? num : max;
+  }, 0);
+
+  const row = buildGoogleSheetRow(record, maxId + 1);
+
+  // A:T = 20 sütun (A,B,...,T). insertDataOption INSERT_ROWS sayesinde,
+  // aralıkta zaten veri olsa bile satır her zaman tablonun EN ALTINA
+  // eklenir, mevcut veriler asla üzerine yazılmaz/silinmez.
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: GOOGLE_SHEET_ID,
+    range: `${title}!A:T`,
+    valueInputOption: 'USER_ENTERED',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: [row] },
+  });
+
+  return { sheetTitle: title, rowId: maxId + 1 };
+}
+
+const sheetAppendLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'Çok fazla Google E-Tablo isteği gönderdiniz. Lütfen birkaç dakika sonra tekrar deneyin.',
+  },
+});
+
+// 4. GOOGLE E-TABLOSUNA SATIR EKLEME ENDPOINT'I
+app.post('/append-to-sheet', sheetAppendLimiter, async (req, res) => {
+  try {
+    const { record } = req.body;
+    if (!record || typeof record !== 'object') {
+      return res.status(400).json({ success: false, error: 'record alanı eksik.' });
+    }
+
+    const result = await appendRecordToGoogleSheet(record);
+    console.log(`✅ Google E-Tablo'ya satır eklendi: "${result.sheetTitle}" sayfası, ID=${result.rowId}`);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    const details = error?.response?.data?.error?.message || error.message;
+    console.error("Google E-Tablo'ya satır eklenemedi:", details);
+    res.status(500).json({ success: false, error: "Google E-Tablo'ya yazılamadı: " + details });
+  }
+});
+
 // --- Hız Sınırlama / Maliyet Koruması ---
 // Gemini'ye giden her /analyze isteği ücretli/kotalı olduğu için, tek bir
 // cihazın (veya kötü niyetli birinin) sunucuyu/API faturasını aşırı

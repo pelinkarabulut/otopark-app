@@ -15,17 +15,21 @@ import {
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import * as ImagePicker from 'expo-image-picker';
+import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import { File, Directory, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import * as MediaLibrary from 'expo-media-library';
 import axios from 'axios';
 import { supabase } from './lib/supabase';
 
-// Gerçek Wi-Fi IPv4 Adresin (192.168.8.104) güncellendi.
-const SERVER_BASE_URL = 'http://192.168.8.104:3000';
+// Render.com üzerindeki canlı (production) backend adresi. Artık telefonun ve
+// bilgisayarın aynı Wi-Fi ağında olması gerekmiyor; sunucu internet üzerinden
+// HTTPS ile erişilebilir durumda.
+const SERVER_BASE_URL = 'https://otopark-app.onrender.com';
 const SERVER_ANALYZE_URL = `${SERVER_BASE_URL}/analyze`;
 const SERVER_EXPORT_URL = `${SERVER_BASE_URL}/export`;
 const SERVER_FORM_IMAGE_URL = `${SERVER_BASE_URL}/form-image`;
+const SERVER_APPEND_SHEET_URL = `${SERVER_BASE_URL}/append-to-sheet`;
 
 const EMPTY_FORM = {
   formNo: '',
@@ -40,6 +44,13 @@ const EMPTY_FORM = {
   gorev: '',
   surucuAdi: '',
 };
+
+// Gemini'ye/sunucuya göndermeden önce görseli küçültüp sıkıştırmak için
+// kullanılan sınırlar. 1280px + %70-80 JPEG kalitesi, plaka/el yazısı gibi
+// ince metinlerin okunabilirliğini bozmadan dosya boyutunu (genelde 8-10 MB
+// -> 300-500 KB) ciddi oranda düşürüyor ve yükleme/analiz süresini kısaltıyor.
+const MAX_ANALYSIS_DIMENSION = 1280;
+const ANALYSIS_JPEG_QUALITY = 0.75;
 
 const SUPABASE_TABLE = 'otopark_formlari';
 
@@ -198,6 +209,40 @@ function AppContent() {
     }
   };
 
+  // Analiz için gönderilecek görseli, okuma (OCR) hassasiyetini bozmadan
+  // küçültüp sıkıştırır: en uzun kenar MAX_ANALYSIS_DIMENSION ile sınırlanır
+  // (küçük görseller büyütülmez, en-boy oranı korunur) ve %75 JPEG kalitesiyle
+  // yeniden kodlanır. Form yapısı/okuma mantığı değişmez; sadece iletilen
+  // dosyanın boyutu küçülür.
+  const optimizeImageForAnalysis = async (asset) => {
+    const context = ImageManipulator.manipulate(asset.uri);
+    const { width, height } = asset;
+
+    if (width && height) {
+      if (width >= height && width > MAX_ANALYSIS_DIMENSION) {
+        context.resize({ width: MAX_ANALYSIS_DIMENSION });
+      } else if (height > width && height > MAX_ANALYSIS_DIMENSION) {
+        context.resize({ height: MAX_ANALYSIS_DIMENSION });
+      }
+      // İki boyut da sınırın altındaysa hiç resize uygulanmaz (büyütme yok).
+    } else {
+      // Boyut bilgisi gelmemişse güvenli tarafta kalıp genişliği sınırla;
+      // tek boyut verildiği için en-boy oranı otomatik korunur.
+      context.resize({ width: MAX_ANALYSIS_DIMENSION });
+    }
+
+    const renderedImage = await context.renderAsync();
+    const result = await renderedImage.saveAsync({
+      compress: ANALYSIS_JPEG_QUALITY,
+      format: SaveFormat.JPEG,
+    });
+
+    context.release();
+    renderedImage.release();
+
+    return result;
+  };
+
   const handleAnalyze = async () => {
     if (!selectedAsset) {
       Alert.alert('Uyarı', 'Önce galeriden bir otopark formu fotoğrafı seçin.');
@@ -207,11 +252,19 @@ function AppContent() {
     setIsAnalyzing(true);
 
     try {
-      const imageFile = new File(selectedAsset.uri);
+      const optimized = await optimizeImageForAnalysis(selectedAsset);
+      const imageFile = new File(optimized.uri);
       const base64Image = await imageFile.base64();
       if (!base64Image) {
         throw new Error('Görsel base64 formatına dönüştürülemedi.');
       }
+
+      // Yaklaşık dosya boyutu (KB) = base64 uzunluğu * 0.75. Optimizasyonun
+      // gerçekten işe yarayıp yaramadığını terminalden takip edebilmek için.
+      console.log(
+        `Analiz için gönderilen görsel: ${optimized.width}x${optimized.height}px, ` +
+          `~${Math.round((base64Image.length * 0.75) / 1024)} KB`
+      );
 
       const response = await axios.post(
         SERVER_ANALYZE_URL,
@@ -396,6 +449,21 @@ function AppContent() {
       } else {
         Alert.alert('Başarılı', 'Form başarıyla arşivlendi, listeye eklendi ve buluta kaydedildi!');
       }
+
+      // Google E-Tablo'ya kaydetmeyi "best-effort" olarak dene; burada oluşacak
+      // bir hata Supabase/yerel kaydı geri almaz, sadece ayrı bir uyarı gösterir.
+      try {
+        await axios.post(SERVER_APPEND_SHEET_URL, { record: newRecord }, { timeout: 30000 });
+        console.log("Google E-Tablo'ya başarıyla eklendi.");
+      } catch (sheetsError) {
+        const sheetsErrorMessage =
+          sheetsError?.response?.data?.error || sheetsError.message || 'Bilinmeyen hata';
+        console.warn("Google E-Tablo'ya eklenirken hata oluştu:", sheetsErrorMessage);
+        Alert.alert(
+          'Google E-Tablo Hatası',
+          'Form Supabase\'e kaydedildi ancak Google E-Tablo\'ya eklenemedi: ' + sheetsErrorMessage
+        );
+      }
     } catch (error) {
       Alert.alert('Hata', 'Form kaydedilirken bir sorun oluştu: ' + error.message);
     }
@@ -415,18 +483,52 @@ function AppContent() {
     }
   };
 
-  const handleExportExcel = async () => {
-    if (records.length === 0) {
-      Alert.alert('Uyarı', 'Excel oluşturmak için en az bir kayıtlı form gerekli.');
-      return;
-    }
+  // "Dosya İndir/Paylaş" her tıklandığında, yerel state'te (bu cihazın
+  // hafızasında) o an ne varsa onunla yetinmek yerine Supabase'deki TÜM
+  // geçmiş kayıtları taze olarak çekiyoruz. Böylece üretilen dosya; başka bir
+  // cihazdan eklenmiş olsa bile bugüne kadar girilmiş tüm formları VE en son
+  // kaydedilen formu bir arada, eskiden yeniye sıralı olarak içerir.
+  // Veritabanı şeması/sütunları değişmiyor; sadece dosya oluşturulmadan önce
+  // "sadece bu cihazdaki liste" yerine "Supabase'deki tam liste" kullanılıyor.
+  const getAllRecordsChronological = async () => {
+    try {
+      const { data, error } = await supabase
+        .from(SUPABASE_TABLE)
+        .select('*')
+        .order('id', { ascending: true }); // ascending = doğrudan eskiden yeniye
 
+      if (error) throw error;
+      if (data && data.length > 0) {
+        return data.map(mapSupabaseRowToRecord);
+      }
+    } catch (error) {
+      console.error(
+        'Supabase\'den tüm kayıtlar çekilemedi, sadece bu cihazdaki yerel liste kullanılacak:',
+        error?.message || error
+      );
+      Alert.alert(
+        'Uyarı',
+        'Buluttaki tüm geçmiş kayıtlar alınamadı, bu yüzden sadece bu cihazda görünen ' +
+          'kayıtlarla devam ediliyor. İnternet bağlantınızı kontrol edip tekrar deneyebilirsiniz.\n\n' +
+          (error?.message || '')
+      );
+    }
+    // Supabase boş döndüyse ya da erişilemediyse, en azından bu cihazdaki
+    // yerel listeyle (eskiden yeniye çevrilmiş) devam et.
+    return [...records].reverse();
+  };
+
+  const handleExportExcel = async () => {
     setIsExporting(true);
     try {
       // Excel'i telefonda değil, bilgisayardaki sunucuda (Node.js) oluşturuyoruz.
       // SheetJS bu boyuttaki (binlerce satırlı) şablonu React Native/Hermes
       // ortamında güvenilir işleyemiyor; sunucuda ise defalarca doğrulandı.
-      const chronologicalRecords = [...records].reverse();
+      const chronologicalRecords = await getAllRecordsChronological();
+      if (chronologicalRecords.length === 0) {
+        Alert.alert('Uyarı', 'Excel oluşturmak için en az bir kayıtlı form gerekli.');
+        return;
+      }
 
       const response = await axios.post(
         SERVER_EXPORT_URL,
@@ -479,7 +581,7 @@ function AppContent() {
       console.error('Excel export hatası:', error?.response?.data || error?.message || error);
       Alert.alert(
         'Sunucuya Bağlanılamadı',
-        'Excel oluşturulamadı. Bilgisayarındaki sunucuya (192.168.8.104:3000) erişilemedi olabilir. Terminalde "node server.js" komutunun açık olduğundan ve telefonunla bilgisayarının aynı Wi-Fi ağına bağlı olduğundan emin ol.'
+        `Excel oluşturulamadı. Sunucuya (${SERVER_BASE_URL}) erişilemedi. İnternet bağlantını ve sunucunun çalışır durumda olduğunu kontrol et.`
       );
     } finally {
       setIsExporting(false);

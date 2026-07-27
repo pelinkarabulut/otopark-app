@@ -38,6 +38,9 @@ Thumbs.db
 .env
 .env*.local
 
+# Google Sheets servis hesabı gizli anahtarı - ASLA git'e eklenmemeli
+google-credentials.json
+
 # typescript
 *.tsbuildinfo
 
