@@ -22,10 +22,17 @@ import * as MediaLibrary from 'expo-media-library';
 import axios from 'axios';
 import { supabase } from './lib/supabase';
 
-// Render.com üzerindeki canlı (production) backend adresi. Artık telefonun ve
-// bilgisayarın aynı Wi-Fi ağında olması gerekmiyor; sunucu internet üzerinden
-// HTTPS ile erişilebilir durumda.
-const SERVER_BASE_URL = 'https://otopark-app.onrender.com';
+// "/export" isteğinin, bilgisayardaki gerçek "HİZMET ARAÇLARI TAKİP FORMU.xlsx"
+// dosyasına KALICI olarak yazabilmesi için (bu özellik sadece server.js yerel
+// çalıştığında işe yarar, Render.com'da çalışmaz), sunucu adresi geçici olarak
+// bilgisayarın yerel Wi-Fi IP'sine çevrildi. Bunun çalışması için:
+//   1) Bilgisayarda bir terminalde `node server.js` çalışıyor olmalı,
+//   2) Telefon ve bilgisayar AYNI Wi-Fi ağına bağlı olmalı,
+//   3) Aşağıdaki IP adresi bilgisayarınızın güncel Wi-Fi IP'si olmalı
+//      (değişirse `ipconfig` ile kontrol edip burayı güncelleyin).
+// Tekrar Render.com'a (internet üzerinden, Wi-Fi gerektirmeyen) dönmek için
+// bu satırı 'https://otopark-app.onrender.com' ile değiştirmeniz yeterli.
+const SERVER_BASE_URL = 'http://192.168.8.104:3000';
 const SERVER_ANALYZE_URL = `${SERVER_BASE_URL}/analyze`;
 const SERVER_EXPORT_URL = `${SERVER_BASE_URL}/export`;
 const SERVER_FORM_IMAGE_URL = `${SERVER_BASE_URL}/form-image`;
