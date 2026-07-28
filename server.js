@@ -570,6 +570,16 @@ function findMaxExistingId(worksheet, range) {
   return maxId;
 }
 
+// Form kaydedildiğinde verilerin DOĞRUDAN yazılacağı gerçek Excel dosyası.
+// NOT: Bu, sunucunun (bu server.js dosyasının) ÇALIŞTIĞI bilgisayardaki bir
+// yoldur — Render.com gibi uzak (Linux) bir sunucuda ÇALIŞMAZ, çünkü orada
+// "C:\Users\pelin\..." diye bir klasör yoktur. Bu özellik yalnızca server.js
+// bu bilgisayarda yerel olarak (`node server.js`) çalıştırıldığında işe yarar.
+// assets/sablon.xlsx artık şablon olarak KULLANILMIYOR; her /export isteğinde
+// doğrudan bu dosya okunup, yeni satırlar eklenip, YİNE BU DOSYANIN ÜZERİNE
+// yazılıyor (yani veriler dosyada kalıcı olarak birikiyor).
+const LOCAL_EXCEL_FILE_PATH = 'C:\\Users\\pelin\\Downloads\\HİZMET ARAÇLARI TAKİP FORMU.xlsx';
+
 // 2. EXCEL DIŞA AKTARMA ENDPOINT'I
 app.post('/export', exportLimiter, (req, res) => {
   try {
@@ -578,9 +588,23 @@ app.post('/export', exportLimiter, (req, res) => {
       return res.status(400).json({ success: false, error: 'Kayıt bulunamadı.' });
     }
 
-    const templatePath = path.join(__dirname, 'assets', 'sablon.xlsx');
+    // Önce kullanıcının gerçek/kalıcı Excel dosyasını dene (yalnızca server.js
+    // bu bilgisayarda yerel çalışıyorsa mevcuttur). Render.com gibi uzak bir
+    // ortamda bu yol hiçbir zaman bulunamayacağı için, orada üretim
+    // akışının kırılmaması amacıyla projeye gömülü assets/sablon.xlsx
+    // şablonuna otomatik olarak geri dönülüyor (o dosyaya kalıcı yazma
+    // yapılmaz, her istekte olduğu gibi sadece okunup bir kopya döndürülür).
+    const fallbackTemplatePath = path.join(__dirname, 'assets', 'sablon.xlsx');
+    const usingLocalPersistentFile = fs.existsSync(LOCAL_EXCEL_FILE_PATH);
+    const templatePath = usingLocalPersistentFile ? LOCAL_EXCEL_FILE_PATH : fallbackTemplatePath;
+    console.log(
+      usingLocalPersistentFile
+        ? `[Export] Gerçek/kalıcı dosya kullanılıyor: "${templatePath}"`
+        : `[Export] "${LOCAL_EXCEL_FILE_PATH}" bulunamadı (muhtemelen Render gibi uzak bir ortamdayız); ` +
+            `yedek şablon kullanılıyor: "${templatePath}"`
+    );
     if (!fs.existsSync(templatePath)) {
-      throw new Error(`assets/sablon.xlsx dosyası bulunamadı: ${templatePath}`);
+      throw new Error(`Ne yerel Excel dosyası ne de yedek şablon (assets/sablon.xlsx) bulunamadı.`);
     }
 
     // Sheet1 hatasını önlemek için güvenli okuma seçenekleri
@@ -616,6 +640,17 @@ app.post('/export', exportLimiter, (req, res) => {
     }
 
     const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx', cellStyles: true });
+
+    // Veriler KALICI olarak birikmesi için, oluşturulan yeni içeriği doğrudan
+    // aynı dosyanın (LOCAL_EXCEL_FILE_PATH) üzerine yazıyoruz. Böylece bir
+    // dahaki /export isteğinde artık bu satırlar da "mevcut veri" olarak
+    // okunup, üzerlerine tekrar yazılmadan bir sonraki satırdan devam edilir.
+    // (Yedek şablon durumunda ise assets/sablon.xlsx'i KASITLI OLARAK
+    // değiştirmiyoruz; o zaman her istek eskisi gibi şablondan taze başlar.)
+    if (usingLocalPersistentFile) {
+      fs.writeFileSync(templatePath, buffer);
+      console.log(`[Export] ${rows.length} yeni satır "${templatePath}" dosyasına kalıcı olarak yazıldı.`);
+    }
 
     // Kullanıcı, şablondaki (aynı plaka/form no tekrar edebilen) binlerce eski
     // satır arasında yeni kaydını "Bul" (Ctrl+F) ile ararken kafası karışmasın
