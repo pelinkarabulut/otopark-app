@@ -56,283 +56,17 @@ if (!GEMINI_API_KEY) {
 }
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-// --- Google E-Tablolar (Sheets) Entegrasyonu ---
-// Her form kaydedildiğinde, kullanıcının kendi Google E-Tablosuna yeni bir
-// satır ekleniyor. Kimlik bilgileri iki şekilde sağlanabilir:
-//   1) Production (Render vb.): google-credentials.json dosyası git'e
-//      gitmediği için, servis hesabı JSON anahtarının TAMAMI tek satırlık
-//      bir JSON string olarak GOOGLE_SERVICE_ACCOUNT_JSON ortam değişkenine
-//      yazılır.
-//   2) Yerel geliştirme: proje kök dizinindeki google-credentials.json
-//      dosyası doğrudan okunur.
-const { google } = require('googleapis');
-
-const GOOGLE_SHEET_ID = '1oayZw4t8PQWOEJ-AuWfbkrXyYYeT4sOIKVOGCM2QOqg';
-const GOOGLE_SHEET_GID = 1348369888;
-
-function loadGoogleCredentials() {
-  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-    try {
-      return JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-    } catch (error) {
-      console.error('GOOGLE_SERVICE_ACCOUNT_JSON çözümlenemedi (geçerli JSON değil):', error.message);
-      return null;
-    }
-  }
-  const localPath = path.join(__dirname, 'google-credentials.json');
-  if (fs.existsSync(localPath)) {
-    try {
-      return JSON.parse(fs.readFileSync(localPath, 'utf8'));
-    } catch (error) {
-      console.error('google-credentials.json okunamadı/parse edilemedi:', error.message);
-      return null;
-    }
-  }
-  return null;
-}
-
-const googleCredentials = loadGoogleCredentials();
-if (!googleCredentials) {
-  console.warn(
-    '⚠️  Google Sheets kimlik bilgisi bulunamadı (google-credentials.json veya ' +
-      'GOOGLE_SERVICE_ACCOUNT_JSON). /append-to-sheet uç noktası çalışmayacak.'
-  );
-} else {
-  console.log(
-    `[Sheets] Kimlik bilgisi yüklendi. Kaynak: ${
-      process.env.GOOGLE_SERVICE_ACCOUNT_JSON ? 'GOOGLE_SERVICE_ACCOUNT_JSON (env)' : 'google-credentials.json (dosya)'
-    }, service account e-postası: ${googleCredentials.client_email || 'BİLİNMİYOR'}`
-  );
-}
-
-let sheetsClientPromise = null;
-function getSheetsClient() {
-  if (!googleCredentials) {
-    console.error('[Sheets] getSheetsClient: googleCredentials tanımsız, client oluşturulamıyor.');
-    return null;
-  }
-  if (!sheetsClientPromise) {
-    console.log('[Sheets] Google auth client ilk kez oluşturuluyor...');
-    const auth = new google.auth.GoogleAuth({
-      credentials: googleCredentials,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
-    sheetsClientPromise = auth
-      .getClient()
-      .then((authClient) => {
-        console.log('[Sheets] Google auth client başarıyla oluşturuldu.');
-        return google.sheets({ version: 'v4', auth: authClient });
-      })
-      .catch((error) => {
-        console.error('[Sheets] Google auth client OLUŞTURULAMADI:', error?.message || error);
-        sheetsClientPromise = null; // Bir sonraki denemede tekrar dene.
-        throw error;
-      });
-  }
-  return sheetsClientPromise;
-}
-
-// gid, sayfanın URL'deki numarası; Sheets API ise A1 aralıklarında sayfa
-// ADINI (title) ister. Bu yüzden ilk istekte gid -> title eşlemesini bulup
-// önbelleğe alıyoruz (sayfa adı değişmediği sürece tekrar sorgulamaya gerek
-// yok).
-let cachedSheetTitle = null;
-async function getTargetSheetTitle(sheets) {
-  if (cachedSheetTitle) {
-    console.log(`[Sheets] Önbellekteki sayfa adı kullanılıyor: "${cachedSheetTitle}"`);
-    return cachedSheetTitle;
-  }
-  console.log(`[Sheets] spreadsheetId=${GOOGLE_SHEET_ID} için sayfa (gid=${GOOGLE_SHEET_GID}) metadata sorgulanıyor...`);
-  const meta = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
-  const allSheets = meta.data.sheets?.map((s) => ({ title: s.properties?.title, sheetId: s.properties?.sheetId }));
-  console.log('[Sheets] Tablodaki tüm sayfalar:', JSON.stringify(allSheets));
-  const match = meta.data.sheets?.find((s) => s.properties?.sheetId === GOOGLE_SHEET_GID);
-  if (!match) {
-    throw new Error(`Google E-Tabloda gid=${GOOGLE_SHEET_GID} olan bir sayfa bulunamadı.`);
-  }
-  cachedSheetTitle = match.properties.title;
-  console.log(`[Sheets] Hedef sayfa bulundu: "${cachedSheetTitle}"`);
-  return cachedSheetTitle;
-}
-
-function formatDateTimeTR(date) {
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-}
-
-// Google E-Tablo Satır Dizilimi (kullanıcı tarafından onaylanan, 20 sütunluk
-// sıra): ID, BAŞLANGIC SAATİ, TAMAMLANMA SAATİ, EPOSTA, AD,
-// FORM NUMARASI GİRİNİZ, SÜTUN1, ARACIN ÇIKIŞ TARİHİ, PLAKA GİRİNİZ,
-// SÜRÜCÜNÜN ADI SOYADI, ARAÇ İSTEĞİNDE BULUNAN DEPARTMANI GİRİNİZ,
-// ARACIN KULLANIM AMACINI GİRİNİZ, ÇIKIŞ KM GİRİNİZ, ÇIKIŞ SAATİNİ GİRİNİZ,
-// DÖNÜŞ KM GİRİNİZ, DÖNÜŞ SAATİNİ GİRİNİZ, ARACIN DÖNÜŞ TARİHİ,
-// TALEP KANALI (boş), TALEP TARİHİ (boş), SORU (boş).
-function buildGoogleSheetRow(record, nextId) {
-  const createdAtMs = Number(record.id);
-  const createdAt = Number.isFinite(createdAtMs) ? new Date(createdAtMs) : new Date();
-  const formattedDateTime = formatDateTimeTR(createdAt);
-
-  return [
-    nextId,
-    formattedDateTime,
-    formattedDateTime,
-    'anonymous',
-    '',
-    record.formNo || '',
-    '',
-    record.cikisTarihi || '',
-    record.plaka || '',
-    record.surucuAdi || '',
-    record.bolum || '',
-    record.gorev || '',
-    record.cikisKm || '',
-    record.cikisSaati || '',
-    record.donusKm || '',
-    record.donusSaati || '',
-    record.donusTarihi || '',
-    '',
-    '',
-    '',
-  ];
-}
-
-async function appendRecordToGoogleSheet(record) {
-  console.log('[Sheets] appendRecordToGoogleSheet çağrıldı.');
-  console.log(`[Sheets] Hedef: spreadsheetId=${GOOGLE_SHEET_ID}, gid=${GOOGLE_SHEET_GID}`);
-  console.log('[Sheets] Gelen record:', JSON.stringify(record));
-
-  const sheets = await getSheetsClient();
-  if (!sheets) {
-    throw new Error(
-      'Google Sheets kimlik bilgileri yapılandırılmadı (GOOGLE_SERVICE_ACCOUNT_JSON ortam ' +
-        'değişkeni veya google-credentials.json dosyası bulunamadı).'
-    );
-  }
-
-  const title = await getTargetSheetTitle(sheets);
-  console.log(`[Sheets] Yazılacak çalışma sayfası (gid=${GOOGLE_SHEET_GID} eşleşmesi): "${title}"`);
-
-  // "values.append" API'sinin kendi tablo-sonu tespiti, sayfada araya serpiştirilmiş
-  // boş satırlar varsa şaşırabiliyor (yanlış satırdan sonra ekleyebiliyor). Bunun
-  // önüne geçmek için A sütununun TAMAMINI (başlıktan sona kadar) okuyup:
-  //   1) Gerçekten veri içeren EN SON satırı kendimiz buluyoruz (boş satırları
-  //      atlayarak; A sütunu boş ama başka bir sütun dolu olan satırları da
-  //      kaçırmamak için A:T aralığının tamamını tarıyoruz),
-  //   2) Yeni satırı bu satırın HEMEN ALTINA, "values.update" ile TAM OLARAK
-  //      belirlediğimiz satır numarasına yazıyoruz (append'in "otomatik" tahminine
-  //      güvenmek yerine).
-  console.log(`[Sheets] "${title}!A:T" aralığının tamamı okunuyor (gerçek son dolu satırı bulmak için)...`);
-  const existing = await sheets.spreadsheets.values.get({
-    spreadsheetId: GOOGLE_SHEET_ID,
-    range: `${title}!A:T`,
-  });
-  const allRows = existing.data.values || [];
-  console.log(`[Sheets] Sayfada toplam okunan satır sayısı (başlık dahil): ${allRows.length}`);
-
-  // Sondan başa doğru tarayıp, herhangi bir hücresi dolu olan İLK satırı
-  // buluyoruz; bu bize "gerçek son dolu satır"ı verir (araya serpiştirilmiş
-  // boş satırlar varsa bile en sona doğru olanlar tamamen boşsa atlanır).
-  let lastNonEmptyRowIndex = 0; // 0 = sadece başlık satırı var / hiç veri yok
-  for (let i = allRows.length - 1; i >= 0; i -= 1) {
-    const row = allRows[i] || [];
-    const hasAnyValue = row.some((cell) => cell !== undefined && cell !== null && String(cell).trim() !== '');
-    if (hasAnyValue) {
-      lastNonEmptyRowIndex = i + 1; // 1-tabanlı satır numarası (Sheets satırları 1'den başlar)
-      break;
-    }
-  }
-  if (lastNonEmptyRowIndex === 0) {
-    lastNonEmptyRowIndex = 1; // Sayfada hiç veri yoksa başlık satırının kendisi (1) kabul edilir.
-  }
-  const targetRow = lastNonEmptyRowIndex + 1;
-  console.log(`[Sheets] Gerçek son dolu satır: ${lastNonEmptyRowIndex}. Yeni veri şu satıra yazılacak: ${targetRow}`);
-
-  // Yeni ID'yi, A sütunundaki (başlık hariç) TÜM değerler arasından en büyük
-  // sayısal değeri bularak belirliyoruz; boş/sayısal olmayan hücreler
-  // (Number.isFinite kontrolü sayesinde) otomatik atlanır.
-  const maxId = allRows.slice(1).reduce((max, row) => {
-    const num = Number(row?.[0]);
-    return Number.isFinite(num) && num > max ? num : max;
-  }, 0);
-  const nextId = maxId + 1;
-  console.log(`[Sheets] Bulunan en büyük ID: ${maxId}, yeni ID: ${nextId}`);
-
-  const row = buildGoogleSheetRow(record, nextId);
-  console.log('[Sheets] Eklenecek satır verisi:', JSON.stringify(row));
-
-  const targetRange = `${title}!A${targetRow}:T${targetRow}`;
-  console.log(`[Sheets] "${targetRange}" aralığına values.update ile yazılıyor...`);
-  const updateResult = await sheets.spreadsheets.values.update({
-    spreadsheetId: GOOGLE_SHEET_ID,
-    range: targetRange,
-    valueInputOption: 'USER_ENTERED',
-    requestBody: { values: [row] },
-  });
-  console.log('[Sheets] update API yanıtı:', JSON.stringify(updateResult.data));
-
-  // Doğrulama: az önce yazdığımız satırı geri okuyup gerçekten orada olduğunu
-  // teyit ediyoruz. Bu, "başarılı" dönüp aslında yazılmamış olma ihtimalini
-  // (ör. yanlış sayfa/aralık) loglardan hemen fark etmemizi sağlar.
-  const verifyResult = await sheets.spreadsheets.values.get({
-    spreadsheetId: GOOGLE_SHEET_ID,
-    range: targetRange,
-  });
-  console.log(`[Sheets] DOĞRULAMA - "${targetRange}" geri okundu:`, JSON.stringify(verifyResult.data.values));
-  const wasWritten = (verifyResult.data.values || []).length > 0;
-  if (!wasWritten) {
-    throw new Error(
-      `Satır yazıldı gibi görünüyor ama doğrulama okumasında "${targetRange}" boş döndü. ` +
-        'Yanlış sayfaya/aralığa yazılmış olabilir.'
-    );
-  }
-
-  return { sheetTitle: title, rowId: nextId, writtenRange: updateResult.data.updatedRange || targetRange };
-}
-
-const sheetAppendLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 30,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: {
-    success: false,
-    error: 'Çok fazla Google E-Tablo isteği gönderdiniz. Lütfen birkaç dakika sonra tekrar deneyin.',
-  },
-});
-
-// 4. GOOGLE E-TABLOSUNA SATIR EKLEME ENDPOINT'I
-app.post('/append-to-sheet', sheetAppendLimiter, async (req, res) => {
-  console.log('\n========== [Sheets] /append-to-sheet isteği alındı ==========');
-  console.log('[Sheets] İstek zamanı:', new Date().toISOString());
-  console.log('[Sheets] İstek body (ham):', JSON.stringify(req.body));
-  try {
-    const { record } = req.body;
-    if (!record || typeof record !== 'object') {
-      console.error('[Sheets] Geçersiz istek: record alanı eksik veya obje değil.');
-      return res.status(400).json({ success: false, error: 'record alanı eksik.' });
-    }
-
-    const result = await appendRecordToGoogleSheet(record);
-    console.log(
-      `✅ [Sheets] Google E-Tablo'ya satır eklendi: "${result.sheetTitle}" sayfası, ID=${result.rowId}, aralık=${result.writtenRange}`
-    );
-    res.json({ success: true, ...result });
-  } catch (error) {
-    // Google API hataları genelde error.response.data içinde detaylı bilgi taşır;
-    // bunu eksiksiz loglayarak (kota, izin, yanlış sheet ID/gid, vb.) kök nedeni
-    // terminalden doğrudan görebilmeyi amaçlıyoruz.
-    console.error('[Sheets] ❌ HATA OLUŞTU');
-    console.error('[Sheets] error.message:', error.message);
-    console.error('[Sheets] error.response?.status:', error?.response?.status);
-    console.error('[Sheets] error.response?.data (tam):', JSON.stringify(error?.response?.data, null, 2));
-    console.error('[Sheets] error.stack:', error.stack);
-
-    const details = error?.response?.data?.error?.message || error.message;
-    res.status(500).json({ success: false, error: "Google E-Tablo'ya yazılamadı: " + details });
-  } finally {
-    console.log('========== [Sheets] /append-to-sheet isteği tamamlandı ==========\n');
-  }
-});
+// NOT: Bu projede daha önce Google E-Tablolar (Sheets API) entegrasyonu, yerel
+// bilgisayardaki bir .xlsx dosyasına doğrudan yazan bir mekanizma, ve ayrıca
+// Windows Görev Zamanlayıcı ile periyodik çalışan bir Python senkronizasyon
+// betiği (export_to_excel.py) vardı; ÜÇÜ DE kullanıcı isteğiyle KALDIRILDI.
+// Artık arka planda çalışan HİÇBİR zamanlanmış görev/cron/otomatik dosya
+// yazma işlemi yoktur. Form kaydedildiğinde tek gerçek veri kaynağı (source
+// of truth) Supabase'dir (bkz. App.js handleSaveRecord). Excel dosyası,
+// SADECE kullanıcı mobil uygulamada "Excel Dosyasını İndir / Paylaş"
+// butonuna bastığında, o anki tüm Supabase kayıtlarıyla isteğe bağlı
+// (on-demand) ve bellekte üretilir; hiçbir yerel diske kalıcı yazma yapılmaz
+// (bkz. aşağıdaki /export endpoint'i).
 
 // --- Hız Sınırlama / Maliyet Koruması ---
 // Gemini'ye giden her /analyze isteği ücretli/kotalı olduğu için, tek bir
@@ -527,22 +261,48 @@ function excelSerialFromDate(date) {
   return localMs / MS_PER_DAY + EXCEL_EPOCH_OFFSET_DAYS;
 }
 
+// Kullanıcının mobil formda elle girdiği "09:00" / "9:00" gibi bir saat
+// metnini, verilen taban tarihin (baseDate) saat/dakikasına uygulayarak yeni
+// bir Date döndürür. Metin boşsa veya "SS:DD" formatına uymuyorsa null
+// döner (çağıran taraf bu durumda güvenli bir varsayılana düşer).
+function combineDateWithTimeString(baseDate, timeString) {
+  if (!timeString) return null;
+  const match = String(timeString).trim().match(/^(\d{1,2})[:.](\d{2})$/);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes) || hours > 23 || minutes > 59) {
+    return null;
+  }
+  const combined = new Date(baseDate);
+  combined.setHours(hours, minutes, 0, 0);
+  return combined;
+}
+
 // Excel Şablonuna Satır Dizilimi
-// NOT: 0-4. sütunlar (Id, Başlangıç saati, Tamamlama saati, E-posta, Ad)
-// Microsoft Forms'un kendi otomatik ürettiği alanlardır. Mobil uygulamadan
-// gelen kayıtlar gerçek bir form gönderimi olmadığı için buradaki değerler
-// (kimlik, e-posta, ad) makul varsayılanlarla dolduruluyor; asıl form verisi
-// 5. sütundan itibaren başlıyor.
+// NOT: 0, 3, 4. sütunlar (Id, E-posta, Ad) Microsoft Forms'un kendi otomatik
+// ürettiği alanlardır. Mobil uygulamadan gelen kayıtlar gerçek bir form
+// gönderimi olmadığı için buradaki değerler (kimlik, e-posta, ad) makul
+// varsayılanlarla dolduruluyor; asıl form verisi 5. sütundan itibaren
+// başlıyor.
+// 1-2. sütunlar (Başlangıç saati / Tamamlama saati) ise artık kullanıcının
+// mobil formda GİRDİĞİ gerçek saatleri yansıtır (bkz. App.js
+// baslangicSaati/tamamlanmaSaati alanları); tarih kısmı için kaydın
+// oluşturulma tarihi (record.id -> zaman damgası) kullanılır. Kullanıcı bu
+// alanları boş bırakmışsa (ör. eski kayıtlar), eski davranışa (kaydın
+// oluşturulma anı) geri düşülür.
 function buildExcelRow(record, nextId) {
   const row = new Array(20).fill(null);
 
   const createdAtMs = Number(record.id);
   const createdAt = Number.isFinite(createdAtMs) ? new Date(createdAtMs) : new Date();
-  const excelDateTime = excelSerialFromDate(createdAt);
+
+  const baslangicDateTime = combineDateWithTimeString(createdAt, record.baslangicSaati) || createdAt;
+  const tamamlanmaDateTime = combineDateWithTimeString(createdAt, record.tamamlanmaSaati) || createdAt;
 
   row[0] = nextId;
-  row[1] = excelDateTime;
-  row[2] = excelDateTime;
+  row[1] = excelSerialFromDate(baslangicDateTime);
+  row[2] = excelSerialFromDate(tamamlanmaDateTime);
   row[3] = 'anonymous';
   row[4] = null;
   row[5] = record.formNo || '';
@@ -570,17 +330,20 @@ function findMaxExistingId(worksheet, range) {
   return maxId;
 }
 
-// Form kaydedildiğinde verilerin DOĞRUDAN yazılacağı gerçek Excel dosyası.
-// NOT: Bu, sunucunun (bu server.js dosyasının) ÇALIŞTIĞI bilgisayardaki bir
-// yoldur — Render.com gibi uzak (Linux) bir sunucuda ÇALIŞMAZ, çünkü orada
-// "C:\Users\pelin\..." diye bir klasör yoktur. Bu özellik yalnızca server.js
-// bu bilgisayarda yerel olarak (`node server.js`) çalıştırıldığında işe yarar.
-// assets/sablon.xlsx artık şablon olarak KULLANILMIYOR; her /export isteğinde
-// doğrudan bu dosya okunup, yeni satırlar eklenip, YİNE BU DOSYANIN ÜZERİNE
-// yazılıyor (yani veriler dosyada kalıcı olarak birikiyor).
-const LOCAL_EXCEL_FILE_PATH = 'C:\\Users\\pelin\\Downloads\\HİZMET ARAÇLARI TAKİP FORMU.xlsx';
+// NOT: Daha önce burada, form kaydedildiği anda bilgisayardaki belirli bir
+// .xlsx dosyasına DOĞRUDAN yazan bir mekanizma (/append-to-excel) vardı. Bu,
+// server.js'in belirli bir bilgisayarda sürekli açık kalmasını VE telefonun
+// o bilgisayarla aynı Wi-Fi ağında olmasını gerektirdiği için KALDIRILDI.
+// Artık tek gerçek veri kaynağı (source of truth) Supabase'dir (bkz. App.js
+// handleSaveRecord). "Dosya İndir/Paylaş" butonu ise projeye gömülü
+// assets/sablon.xlsx şablonunu kullanarak, o an Supabase'den çekilmiş TÜM
+// kayıtları içeren yeni bir Excel dosyası üretir (kalıcı yerel yazma yapmaz).
+const TEMPLATE_PATH = path.join(__dirname, 'assets', 'sablon.xlsx');
 
-// 2. EXCEL DIŞA AKTARMA ENDPOINT'I
+// 2. EXCEL DIŞA AKTARMA ENDPOINT'I ("Excel Dosyasını İndir / Paylaş" butonu)
+// Bu endpoint hiçbir zaman yerel diske kalıcı yazma yapmaz: her istekte
+// şablonu SADECE OKUR, gövdede (body) gelen kayıtları belleğe ekler ve
+// oluşan dosyayı doğrudan yanıt (response) olarak geri döner.
 app.post('/export', exportLimiter, (req, res) => {
   try {
     const { records } = req.body;
@@ -588,30 +351,14 @@ app.post('/export', exportLimiter, (req, res) => {
       return res.status(400).json({ success: false, error: 'Kayıt bulunamadı.' });
     }
 
-    // Önce kullanıcının gerçek/kalıcı Excel dosyasını dene (yalnızca server.js
-    // bu bilgisayarda yerel çalışıyorsa mevcuttur). Render.com gibi uzak bir
-    // ortamda bu yol hiçbir zaman bulunamayacağı için, orada üretim
-    // akışının kırılmaması amacıyla projeye gömülü assets/sablon.xlsx
-    // şablonuna otomatik olarak geri dönülüyor (o dosyaya kalıcı yazma
-    // yapılmaz, her istekte olduğu gibi sadece okunup bir kopya döndürülür).
-    const fallbackTemplatePath = path.join(__dirname, 'assets', 'sablon.xlsx');
-    const usingLocalPersistentFile = fs.existsSync(LOCAL_EXCEL_FILE_PATH);
-    const templatePath = usingLocalPersistentFile ? LOCAL_EXCEL_FILE_PATH : fallbackTemplatePath;
-    console.log(
-      usingLocalPersistentFile
-        ? `[Export] Gerçek/kalıcı dosya kullanılıyor: "${templatePath}"`
-        : `[Export] "${LOCAL_EXCEL_FILE_PATH}" bulunamadı (muhtemelen Render gibi uzak bir ortamdayız); ` +
-            `yedek şablon kullanılıyor: "${templatePath}"`
-    );
-    if (!fs.existsSync(templatePath)) {
-      throw new Error(`Ne yerel Excel dosyası ne de yedek şablon (assets/sablon.xlsx) bulunamadı.`);
+    if (!fs.existsSync(TEMPLATE_PATH)) {
+      throw new Error('Şablon dosyası (assets/sablon.xlsx) bulunamadı.');
     }
 
-    // Sheet1 hatasını önlemek için güvenli okuma seçenekleri
-    const workbook = XLSX.readFile(templatePath, {
+    const workbook = XLSX.readFile(TEMPLATE_PATH, {
       cellStyles: true,
       cellFormulas: true,
-      cellDates: true
+      cellDates: true,
     });
 
     const sheetName = workbook.SheetNames[0] || 'Sheet1';
@@ -624,10 +371,6 @@ app.post('/export', exportLimiter, (req, res) => {
     const rows = records.map((record) => buildExcelRow(record, nextId++));
     XLSX.utils.sheet_add_aoa(worksheet, rows, { origin: -1 });
 
-    // Başlangıç/Tamamlama saati sütunlarını, şablondaki diğer tarih
-    // hücreleriyle aynı görünecek şekilde (ör. "7/22/26 12:08") biçimlendir;
-    // aksi halde yeni satırlar ham sayı (46225.51 gibi) olarak görünüp
-    // diğer satırlarla hizasız/tutarsız dururdu.
     for (let i = 0; i < rows.length; i++) {
       const rowIndex = firstNewRowIndex + i;
       [1, 2].forEach((colIndex) => {
@@ -641,23 +384,8 @@ app.post('/export', exportLimiter, (req, res) => {
 
     const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx', cellStyles: true });
 
-    // Veriler KALICI olarak birikmesi için, oluşturulan yeni içeriği doğrudan
-    // aynı dosyanın (LOCAL_EXCEL_FILE_PATH) üzerine yazıyoruz. Böylece bir
-    // dahaki /export isteğinde artık bu satırlar da "mevcut veri" olarak
-    // okunup, üzerlerine tekrar yazılmadan bir sonraki satırdan devam edilir.
-    // (Yedek şablon durumunda ise assets/sablon.xlsx'i KASITLI OLARAK
-    // değiştirmiyoruz; o zaman her istek eskisi gibi şablondan taze başlar.)
-    if (usingLocalPersistentFile) {
-      fs.writeFileSync(templatePath, buffer);
-      console.log(`[Export] ${rows.length} yeni satır "${templatePath}" dosyasına kalıcı olarak yazıldı.`);
-    }
-
-    // Kullanıcı, şablondaki (aynı plaka/form no tekrar edebilen) binlerce eski
-    // satır arasında yeni kaydını "Bul" (Ctrl+F) ile ararken kafası karışmasın
-    // diye, yeni verinin tam olarak hangi Excel satırına düştüğünü de
-    // özel bir header ile bildiriyoruz (1-tabanlı Excel satır numarası).
     const newRange = XLSX.utils.decode_range(worksheet['!ref']);
-    const lastRowExcelNumber = newRange.e.r + 1; // 0-tabanlı -> 1-tabanlı
+    const lastRowExcelNumber = newRange.e.r + 1;
     const firstNewRowExcelNumber = lastRowExcelNumber - rows.length + 1;
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -679,6 +407,8 @@ app.post('/export', exportLimiter, (req, res) => {
 // view-shot gibi kütüphaneleri desteklemeyen) kısıtlamalarına takılmadan,
 // zaten çalışan sunucu tarafında yapmak en güvenilir yöntem.
 const FORM_IMAGE_FIELDS = [
+  { key: 'baslangicSaati', label: 'Başlangıç Saati' },
+  { key: 'tamamlanmaSaati', label: 'Tamamlanma Saati' },
   { key: 'formNo', label: 'Form Numarası' },
   { key: 'plaka', label: 'Plaka' },
   { key: 'bolum', label: 'Bölüm / Departman' },

@@ -19,26 +19,53 @@ import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import { File, Directory, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import * as MediaLibrary from 'expo-media-library';
+import * as SplashScreen from 'expo-splash-screen';
 import axios from 'axios';
 import { supabase } from './lib/supabase';
 
-// "/export" isteğinin, bilgisayardaki gerçek "HİZMET ARAÇLARI TAKİP FORMU.xlsx"
-// dosyasına KALICI olarak yazabilmesi için (bu özellik sadece server.js yerel
-// çalıştığında işe yarar, Render.com'da çalışmaz), sunucu adresi geçici olarak
-// bilgisayarın yerel Wi-Fi IP'sine çevrildi. Bunun çalışması için:
-//   1) Bilgisayarda bir terminalde `node server.js` çalışıyor olmalı,
-//   2) Telefon ve bilgisayar AYNI Wi-Fi ağına bağlı olmalı,
-//   3) Aşağıdaki IP adresi bilgisayarınızın güncel Wi-Fi IP'si olmalı
-//      (değişirse `ipconfig` ile kontrol edip burayı güncelleyin).
-// Tekrar Render.com'a (internet üzerinden, Wi-Fi gerektirmeyen) dönmek için
-// bu satırı 'https://otopark-app.onrender.com' ile değiştirmeniz yeterli.
-const SERVER_BASE_URL = 'http://192.168.8.104:3000';
+SplashScreen.preventAutoHideAsync().catch(() => {});
+
+// Üretim (production) sunucu adresi. Yerel geliştirmede geçici olarak
+// farklı bir URL denemek isterseniz EXPO_PUBLIC_SERVER_URL ortam değişkenini
+// kullanın; aksi halde her zaman canlı Render backend'e bağlanır.
+// Form kayıtları doğrudan Supabase'e yazılır; Excel dosyası yalnızca
+// "Excel Dosyasını İndir / Paylaş" butonuyla isteğe bağlı üretilir.
+const SERVER_BASE_URL = (
+  process.env.EXPO_PUBLIC_SERVER_URL || 'https://otopark-app.onrender.com'
+).replace(/\/+$/, '');
 const SERVER_ANALYZE_URL = `${SERVER_BASE_URL}/analyze`;
 const SERVER_EXPORT_URL = `${SERVER_BASE_URL}/export`;
 const SERVER_FORM_IMAGE_URL = `${SERVER_BASE_URL}/form-image`;
-const SERVER_APPEND_SHEET_URL = `${SERVER_BASE_URL}/append-to-sheet`;
+
+// Render'ın ücretsiz katmanı, sunucu ~15 dakika hiç istek almazsa onu
+// uyutuyor; bir sonraki istek sunucuyu uyandırırken bazen 60 saniyeyi bile
+// aşabiliyor. Bu yüzden zaman aşımını cömert (90 sn) tutuyoruz.
+const SERVER_REQUEST_TIMEOUT_MS = 90000;
+
+// axios bir zaman aşımına (timeout) uğradığında error.response HİÇ olmaz;
+// bu da gerçekte "sunucu var ama uyanması uzun sürdü" durumunu, sunucuya hiç
+// ulaşılamadığı ya da internetin kapalı olduğu durumdan ayırt edemememize yol
+// açardı. Bu fonksiyon, zaman aşımı durumunda kullanıcıya çok daha isabetli
+// ("sunucu uyanıyor olabilir, tekrar dene") bir mesaj gösterir.
+function getServerConnectionErrorMessage(error) {
+  const isTimeout =
+    error?.code === 'ECONNABORTED' || /timeout/i.test(error?.message || '');
+  if (isTimeout) {
+    return (
+      `Sunucu (${SERVER_BASE_URL}) şu anda "uyku modundan" uyanıyor olabilir ` +
+      '(ücretsiz sunucu barındırma, uzun süre kullanılmayınca uykuya geçiyor). ' +
+      'Lütfen 30-60 saniye bekleyip tekrar deneyin; genelde ikinci denemede sorunsuz çalışır.'
+    );
+  }
+  return (
+    `Sunucuya (${SERVER_BASE_URL}) erişilemedi. İnternet bağlantını ve sunucunun ` +
+    'çalışır durumda olduğunu kontrol et.'
+  );
+}
 
 const EMPTY_FORM = {
+  baslangicSaati: '',
+  tamamlanmaSaati: '',
   formNo: '',
   plaka: '',
   bolum: '',
@@ -61,12 +88,33 @@ const ANALYSIS_JPEG_QUALITY = 0.75;
 
 const SUPABASE_TABLE = 'otopark_formlari';
 
+// KURAL: Aynı form bilgileri (aynı plaka/form no vb.) 100 kere bile
+// gönderilse, her gönderim BAĞIMSIZ ve BENZERSİZ bir satır olarak eklenir;
+// hiçbir alanda UNIQUE kısıtlama yoktur ve hiçbir yerde UPSERT/UPDATE ile
+// "üzerine yazma" yapılmaz (bkz. handleSaveRecord, her zaman .insert()).
+//
+// id, Date.now() (milisaniye) + 3 haneli rastgele bir sayıdan üretilir. Salt
+// Date.now() kullanmak, aynı milisaniyede (ör. çok hızlı art arda basma veya
+// iki farklı cihazdan eşzamanlı gönderim) teorik bir çakışma riski taşırdı;
+// rastgele son ek bu riski pratikte sıfıra indirir. Yine de (çok düşük
+// ihtimalle) bir çakışma olursa handleSaveRecord bunu Postgres'in "23505"
+// (unique violation) hatasından yakalayıp yeni bir id ile otomatik tekrar
+// dener; böylece bir kayıt asla sessizce kaybolmaz.
+function generateUniqueRecordId() {
+  const randomSuffix = Math.floor(Math.random() * 1000)
+    .toString()
+    .padStart(3, '0');
+  return Number(`${Date.now()}${randomSuffix}`);
+}
+
 // records state'indeki alanlar camelCase (formNo, cikisTarihi...), Supabase
 // tablosundaki sütunlar ise snake_case (form_no, cikis_tarihi...). Bu iki
 // fonksiyon aralarında dönüşüm yapar.
 function mapRecordToSupabaseRow(record) {
   return {
     id: Number(record.id),
+    baslangic_saati: record.baslangicSaati || null,
+    tamamlanma_saati: record.tamamlanmaSaati || null,
     form_no: record.formNo || null,
     plaka: record.plaka || null,
     bolum: record.bolum || null,
@@ -85,6 +133,8 @@ function mapRecordToSupabaseRow(record) {
 function mapSupabaseRowToRecord(row) {
   return {
     id: String(row.id),
+    baslangicSaati: row.baslangic_saati || '',
+    tamamlanmaSaati: row.tamamlanma_saati || '',
     formNo: row.form_no || '',
     plaka: row.plaka || '',
     bolum: row.bolum || '',
@@ -102,6 +152,11 @@ function mapSupabaseRowToRecord(row) {
 
 function mapServerResponseToFormData(data) {
   return {
+    // Başlangıç/Tamamlanma saati kağıt formda yer almaz; kullanıcı bu iki
+    // alanı analiz sonrası elle girer. Yine de kontrolsüz (uncontrolled)
+    // TextInput uyarısı almamak için boş string ile başlatıyoruz.
+    baslangicSaati: '',
+    tamamlanmaSaati: '',
     formNo: data?.form_no != null ? String(data.form_no).trim() : '',
     plaka: data?.plaka != null ? String(data.plaka).trim() : '',
     bolum: data?.bolum != null ? String(data.bolum).trim() : '',
@@ -117,6 +172,8 @@ function mapServerResponseToFormData(data) {
 }
 
 const FIELD_LABELS = [
+  { key: 'baslangicSaati', label: 'Başlangıç Saati', placeholder: '09:00' },
+  { key: 'tamamlanmaSaati', label: 'Tamamlanma Saati', placeholder: '17:30' },
   { key: 'formNo', label: 'Form Numarası', placeholder: '006430', keyboardType: 'number-pad' },
   { key: 'plaka', label: 'Plaka', placeholder: '34 PVY 009', autoCapitalize: 'characters' },
   { key: 'bolum', label: 'Bölüm / Departman', placeholder: 'Paketleme - İd. İşler' },
@@ -161,6 +218,10 @@ function AppContent() {
   // Uygulama açılışında, daha önce kaydedilmiş formları Supabase'den çek.
   // Bu sayede kayıtlar sadece bu oturumda değil, uygulama kapatılıp açılsa
   // da (hatta başka bir cihazda) kalıcı olarak görünür.
+  // NOT: Burada SADECE aktif kayıtlar (is_deleted = false) çekilir; "Sil"
+  // butonuyla yumuşak-silinmiş (soft-deleted) kayıtlar bu listede ASLA
+  // görünmez, ama veritabanından da hiçbir zaman kalıcı olarak silinmezler
+  // (bkz. handleDeleteRecord ve getAllRecordsChronological/Excel dışa aktarma).
   useEffect(() => {
     let isMounted = true;
     (async () => {
@@ -168,16 +229,19 @@ function AppContent() {
         const { data, error } = await supabase
           .from(SUPABASE_TABLE)
           .select('*')
+          .eq('is_deleted', false)
           .order('id', { ascending: false });
         if (error) throw error;
         if (isMounted && data) {
           setRecords(data.map(mapSupabaseRowToRecord));
         }
       } catch (error) {
-        console.error('Kayıtlar Supabase\'den yüklenemedi:', error?.message || error);
+        // Liste boş kalır; kullanıcı Alert ile ayrıca bilgilendirilmez (sessiz
+        // açılış). Ağ yoksa yerel boş liste ile devam edilir.
       } finally {
         if (isMounted) {
           setIsLoadingRecords(false);
+          SplashScreen.hideAsync().catch(() => {});
         }
       }
     })();
@@ -266,20 +330,10 @@ function AppContent() {
         throw new Error('Görsel base64 formatına dönüştürülemedi.');
       }
 
-      // Yaklaşık dosya boyutu (KB) = base64 uzunluğu * 0.75. Optimizasyonun
-      // gerçekten işe yarayıp yaramadığını terminalden takip edebilmek için.
-      console.log(
-        `Analiz için gönderilen görsel: ${optimized.width}x${optimized.height}px, ` +
-          `~${Math.round((base64Image.length * 0.75) / 1024)} KB`
-      );
-
       const response = await axios.post(
         SERVER_ANALYZE_URL,
         { base64Image },
-        // Render (ücretsiz katman) gibi barındırmalarda sunucu 15 dakika
-        // hareketsiz kalırsa "uyur"; ilk istek onu uyandırırken 30-50 sn
-        // sürebilir. Bu yüzden zaman aşımını cömert tutuyoruz.
-        { timeout: 60000 }
+        { timeout: SERVER_REQUEST_TIMEOUT_MS }
       );
 
       const payload = response.data;
@@ -290,10 +344,6 @@ function AppContent() {
       setFormData(mapServerResponseToFormData(payload.data));
       setHasResult(true);
     } catch (error) {
-      console.error(
-        'Sunucu isteği başarısız oldu:',
-        error?.response?.data || error?.message || error
-      );
       setFormData(EMPTY_FORM);
       setHasResult(true);
 
@@ -304,10 +354,7 @@ function AppContent() {
       if (serverMessage) {
         Alert.alert('Analiz Başarısız', serverMessage);
       } else {
-        Alert.alert(
-          'Sunucuya Bağlanılamadı',
-          `Sunucuya (${SERVER_BASE_URL}) erişilemedi. İnternet bağlantını ve sunucunun çalışır durumda olduğunu kontrol et.`
-        );
+        Alert.alert('Sunucuya Bağlanılamadı', getServerConnectionErrorMessage(error));
       }
     } finally {
       setIsAnalyzing(false);
@@ -330,9 +377,7 @@ function AppContent() {
       const response = await axios.post(
         SERVER_FORM_IMAGE_URL,
         { formData },
-        // Render (ücretsiz katman) uyku modundan çıkarken gecikme olabileceği
-        // için zaman aşımını /export ile aynı seviyeye çıkardık.
-        { timeout: 60000, responseType: 'arraybuffer' }
+        { timeout: SERVER_REQUEST_TIMEOUT_MS, responseType: 'arraybuffer' }
       );
       const bytes = new Uint8Array(response.data);
       if (!bytes || bytes.length < 100) {
@@ -347,10 +392,6 @@ function AppContent() {
       imageFile.write(bytes);
       return imageFile.uri;
     } catch (error) {
-      console.error(
-        'Form görseli oluşturulamadı, orijinal fotoğrafla devam ediliyor:',
-        error?.response?.data || error?.message || error
-      );
       Alert.alert(
         'Form Görseli Oluşturulamadı',
         'Form bilgilerinden beyaz sayfa görseli oluşturulamadı (sunucuya ulaşılamamış olabilir); onun yerine orijinal fotoğraf kullanılacak.'
@@ -380,7 +421,8 @@ function AppContent() {
         return;
       }
     } catch (e) {
-      console.warn('Galeriye doğrudan kaydetme kullanılamadı, paylaşım ekranına düşülüyor:', e?.message || e);
+      // Expo Go / kısıtlı izinlerde doğrudan galeri kaydı başarısız olabilir;
+      // aşağıdaki paylaşım ekranına düşülür.
     }
 
     try {
@@ -402,7 +444,7 @@ function AppContent() {
         );
       }
     } catch (e) {
-      console.error('Paylaşım ekranı açılamadı:', e?.message || e);
+      Alert.alert('Paylaşım Hatası', e?.message || 'Paylaşım ekranı açılamadı.');
     }
   };
 
@@ -424,21 +466,15 @@ function AppContent() {
       return;
     }
 
-    // Not: Aşağıdaki 3 adım (arşivleme, Supabase, Google E-Tablo) BİLEREK 3 AYRI
-    // try/catch bloğuna ayrıldı. Böylece herhangi biri (ör. galeriye kaydetme
-    // izni sorunu ya da Supabase hatası) patlarsa, diğer ikisi YİNE DE
-    // çalışmaya devam eder — eskiden hepsi TEK bir try/catch içindeyken, en
-    // baştaki archiveImage() hata fırlatırsa Supabase'e VE Google E-Tablo'ya
-    // hiç istek atılmıyordu.
+    // Not: Aşağıdaki adımlar (arşivleme, Supabase) BİLEREK ayrı try/catch
+    // bloklarına ayrıldı. Böylece biri başarısız olsa diğeri yine denenebilir.
 
     // 1) Fotoğrafı/form görselini arşivle. Başarısız olursa akışı DURDURMUYORUZ;
-    // en azından Supabase ve Google E-Tablo kaydı denensin diye archivedUri'yi
-    // boş bırakıp devam ediyoruz.
+    // en azından Supabase kaydı denensin diye archivedUri'yi boş bırakıp devam ediyoruz.
     let archivedUri = null;
     try {
       archivedUri = await archiveImage();
     } catch (archiveError) {
-      console.error('Arşivleme hatası (Supabase/Sheets kaydı yine de denenecek):', archiveError?.message || archiveError);
       Alert.alert(
         'Arşivleme Uyarısı',
         'Form görseli telefona kaydedilemedi ancak form verisi buluta kaydedilmeye devam edilecek: ' +
@@ -447,22 +483,33 @@ function AppContent() {
     }
 
     const newRecord = {
-      id: `${Date.now()}`,
+      id: `${generateUniqueRecordId()}`,
       ...formData,
       archivedUri,
     };
 
-    // 2) Supabase'e kaydet.
-    const supabaseRow = mapRecordToSupabaseRow(newRecord);
+    // 2) Supabase'e kaydet. DİKKAT: Burada HER ZAMAN .insert() kullanılır;
+    // aynı plaka/form no daha önce onlarca kez girilmiş olsa bile bu KESİNLİKLE
+    // yeni bir satır olarak eklenir (asla var olan bir satırı güncellemez).
+    let supabaseRow = mapRecordToSupabaseRow(newRecord);
     let cloudSaveError = null;
     try {
-      const { error } = await supabase.from(SUPABASE_TABLE).insert(supabaseRow);
+      let { error } = await supabase.from(SUPABASE_TABLE).insert(supabaseRow);
+
+      // "23505" = Postgres unique_violation. id üretimi (bkz.
+      // generateUniqueRecordId) çakışma ihtimalini pratikte sıfıra
+      // indiriyor olsa da, olası bir çakışmada kaydın sessizce kaybolmaması
+      // için yeni bir id ile BİR KEZ daha deniyoruz.
+      if (error?.code === '23505') {
+        newRecord.id = `${generateUniqueRecordId()}`;
+        supabaseRow = mapRecordToSupabaseRow(newRecord);
+        ({ error } = await supabase.from(SUPABASE_TABLE).insert(supabaseRow));
+      }
+
       if (error) {
-        console.error('Supabase Kayıt Hatası:', error);
         cloudSaveError = error;
       }
     } catch (error) {
-      console.error('Supabase Kayıt Hatası:', error);
       cloudSaveError = error;
     }
 
@@ -476,59 +523,30 @@ function AppContent() {
     } else {
       Alert.alert('Başarılı', 'Form başarıyla arşivlendi, listeye eklendi ve buluta kaydedildi!');
     }
-
-    // 3) Google E-Tablo'ya kaydet. Supabase adımı ne olursa olsun (başarılı ya
-    // da başarısız) BURAYA HER ZAMAN GİRİLİR; ayrı bir try/catch'te olduğu için
-    // yukarıdaki adımlardan bağımsızdır.
-    console.log(
-      `[Sheets-Client] /append-to-sheet isteği gönderiliyor -> URL: ${SERVER_APPEND_SHEET_URL}, record.id: ${newRecord.id}`
-    );
-    try {
-      const sheetResponse = await axios.post(
-        SERVER_APPEND_SHEET_URL,
-        { record: newRecord },
-        { timeout: 30000 }
-      );
-      console.log(
-        `[Sheets-Client] Google E-Tablo'ya başarıyla eklendi. Sunucu yanıtı:`,
-        JSON.stringify(sheetResponse.data)
-      );
-    } catch (sheetsError) {
-      // Ağ hatası (sunucuya hiç ulaşılamadı) ile sunucunun döndürdüğü hatayı
-      // (ör. yanlış sheet/gid, kimlik bilgisi eksik) ayırt ederek logluyoruz.
-      if (sheetsError.response) {
-        console.error(
-          `[Sheets-Client] Sunucu HATA döndürdü. status=${sheetsError.response.status}, body=`,
-          JSON.stringify(sheetsError.response.data)
-        );
-      } else if (sheetsError.request) {
-        console.error(
-          '[Sheets-Client] İstek gönderildi ama sunucudan hiç yanıt alınamadı (ağ/zaman aşımı sorunu):',
-          sheetsError.message
-        );
-      } else {
-        console.error('[Sheets-Client] İstek oluşturulurken hata oluştu:', sheetsError.message);
-      }
-
-      const sheetsErrorMessage =
-        sheetsError?.response?.data?.error || sheetsError.message || 'Bilinmeyen hata';
-      Alert.alert(
-        'Google E-Tablo Hatası',
-        'Form Supabase\'e kaydedildi ancak Google E-Tablo\'ya eklenemedi: ' + sheetsErrorMessage
-      );
-    }
+    // NOT: Excel'e otomatik/arka planda yazma YOKTUR. Kayıt burada sadece
+    // Supabase'e düşer; Excel dosyası ancak kullanıcı "Excel Dosyasını İndir /
+    // Paylaş" butonuna bastığında, o anki tüm Supabase verisiyle anlık olarak
+    // üretilir (bkz. handleExportExcel).
   };
 
+  // YUMUŞAK SİLME (SOFT DELETE): "Sil" butonu veriyi veritabanından KALICI
+  // OLARAK asla silmez (HARD DELETE yapılmaz). Sadece is_deleted = true
+  // olarak işaretlenir; böylece kayıt "Kaydedilen Formlar" listesinden
+  // kaybolur ama veritabanında ve Excel tam arşivinde (bkz.
+  // getAllRecordsChronological / handleExportExcel) kalıcı olarak kalmaya
+  // devam eder.
   const handleDeleteRecord = async (id) => {
     setRecords((prev) => prev.filter((record) => record.id !== id));
     try {
-      const { error } = await supabase.from(SUPABASE_TABLE).delete().eq('id', Number(id));
+      const { error } = await supabase
+        .from(SUPABASE_TABLE)
+        .update({ is_deleted: true })
+        .eq('id', Number(id));
       if (error) throw error;
     } catch (error) {
-      console.error('Kayıt Supabase\'den silinemedi:', error?.message || error);
       Alert.alert(
         'Bulut Silme Başarısız',
-        'Kayıt listeden kaldırıldı ancak Supabase\'den silinemedi: ' + (error?.message || 'Bilinmeyen hata')
+        'Kayıt listeden kaldırıldı ancak buluttaki durumu güncellenemedi: ' + (error?.message || 'Bilinmeyen hata')
       );
     }
   };
@@ -540,6 +558,11 @@ function AppContent() {
   // kaydedilen formu bir arada, eskiden yeniye sıralı olarak içerir.
   // Veritabanı şeması/sütunları değişmiyor; sadece dosya oluşturulmadan önce
   // "sadece bu cihazdaki liste" yerine "Supabase'deki tam liste" kullanılıyor.
+  //
+  // ÖNEMLİ: Bu sorguya KASITLI olarak is_deleted filtresi EKLENMEMİŞTİR.
+  // Excel'e "tam arşiv" (full archive) kuralı gereği, uygulamadan "Sil"
+  // butonuyla yumuşak-silinmiş (is_deleted = true) kayıtlar DAHİL, bugüne
+  // kadar sisteme girilmiş HER satır Excel çıktısında yer almalıdır.
   const getAllRecordsChronological = async () => {
     try {
       const { data, error } = await supabase
@@ -552,10 +575,6 @@ function AppContent() {
         return data.map(mapSupabaseRowToRecord);
       }
     } catch (error) {
-      console.error(
-        'Supabase\'den tüm kayıtlar çekilemedi, sadece bu cihazdaki yerel liste kullanılacak:',
-        error?.message || error
-      );
       Alert.alert(
         'Uyarı',
         'Buluttaki tüm geçmiş kayıtlar alınamadı, bu yüzden sadece bu cihazda görünen ' +
@@ -583,7 +602,7 @@ function AppContent() {
       const response = await axios.post(
         SERVER_EXPORT_URL,
         { records: chronologicalRecords },
-        { timeout: 60000, responseType: 'arraybuffer' }
+        { timeout: SERVER_REQUEST_TIMEOUT_MS, responseType: 'arraybuffer' }
       );
 
       const outBytes = new Uint8Array(response.data);
@@ -604,7 +623,10 @@ function AppContent() {
             : `Yeni kayıtlarınız Excel'in ${rowStart}-${rowEnd}. satırlarına eklendi.`
           : null;
 
-      const excelFile = new File(Paths.cache, `otopark_formlari_${timestampSuffix()}.xlsx`);
+      // Sabit dosya adı: her indirmede aynı ada sahip, o ana kadarki TÜM
+      // kayıtları içeren tek/güncel bir dosya üretilir (tarihli/parçalı
+      // kopyalar biriktirmez).
+      const excelFile = new File(Paths.cache, 'HİZMET ARAÇLARI TAKİP FORMU.xlsx');
       if (excelFile.exists) {
         excelFile.delete();
       }
@@ -628,10 +650,9 @@ function AppContent() {
         Alert.alert('Kaydedildi', `Excel dosyası kaydedildi: ${excelFile.uri}`);
       }
     } catch (error) {
-      console.error('Excel export hatası:', error?.response?.data || error?.message || error);
       Alert.alert(
         'Sunucuya Bağlanılamadı',
-        `Excel oluşturulamadı. Sunucuya (${SERVER_BASE_URL}) erişilemedi. İnternet bağlantını ve sunucunun çalışır durumda olduğunu kontrol et.`
+        `Excel oluşturulamadı. ${getServerConnectionErrorMessage(error)}`
       );
     } finally {
       setIsExporting(false);
