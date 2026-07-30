@@ -343,8 +343,114 @@ function findMaxExistingId(worksheet, range) {
 // assets/sablon.xlsx şablonunu kullanarak, o an Supabase'den çekilmiş TÜM
 // kayıtları içeren yeni bir Excel dosyası üretir (kalıcı yerel yazma yapmaz).
 const TEMPLATE_PATH = path.join(__dirname, 'assets', 'sablon.xlsx');
+// Uygulamadan indirilen Excel: içinde Power/Web Query olarak
+// /excel-feed.csv adresine önceden bağlı canlı şablon.
+const LIVE_EXPORT_TEMPLATE_PATH = path.join(__dirname, 'assets', 'canli_otopark_sablon.xlsx');
 
-// --- Canlı Excel beslemesi (Power Query / "Web'den Veri Al") ---
+function sendLiveExcelTemplate(res) {
+  if (!fs.existsSync(LIVE_EXPORT_TEMPLATE_PATH)) {
+    throw new Error(
+      'Canlı Excel şablonu (assets/canli_otopark_sablon.xlsx) bulunamadı. ' +
+        'Sunucuda `node scripts/build-live-excel-template.js` çalıştırın.'
+    );
+  }
+
+  const buffer = fs.readFileSync(LIVE_EXPORT_TEMPLATE_PATH);
+  res.setHeader(
+    'Content-Type',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  );
+  res.setHeader(
+    'Content-Disposition',
+    'attachment; filename="HIZMET_ARACLARI_TAKIP_FORMU_CANLI.xlsx"'
+  );
+  res.setHeader('X-Excel-Mode', 'live-web-query');
+  res.setHeader('X-Excel-Feed', 'https://otopark-app.onrender.com/excel-feed.csv');
+  res.setHeader('Access-Control-Expose-Headers', 'X-Excel-Mode, X-Excel-Feed');
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(buffer);
+}
+
+// 2. EXCEL DIŞA AKTARMA ENDPOINT'I ("Excel Dosyasını İndir / Paylaş" butonu)
+// Artık kaydı dosyaya "yapıştırıp" göndermiyoruz. Kullanıcıya, içinde
+// https://otopark-app.onrender.com/excel-feed.csv web sorgusu gömülü hazır
+// bir .xlsx veriyoruz. Dosya bilgisayarda açılınca / "Tümü Yenile" deyince
+// Excel bu adresten canlı veriyi çeker; uygulamadan tekrar indirmeye gerek kalmaz.
+app.post('/export', exportLimiter, (req, res) => {
+  try {
+    sendLiveExcelTemplate(res);
+  } catch (error) {
+    console.error('Sunucu Excel Hatası:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/export', exportLimiter, (req, res) => {
+  try {
+    sendLiveExcelTemplate(res);
+  } catch (error) {
+    console.error('Sunucu Excel Hatası:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// (Eski davranış yedeği: gövdede records ile şablona satır ekleme — artık
+// varsayılan /export kullanılmıyor. Gerekirse /export-snapshot ile erişilir.)
+app.post('/export-snapshot', exportLimiter, (req, res) => {
+  try {
+    const { records } = req.body;
+    if (!records || !Array.isArray(records)) {
+      return res.status(400).json({ success: false, error: 'Kayıt bulunamadı.' });
+    }
+
+    if (!fs.existsSync(TEMPLATE_PATH)) {
+      throw new Error('Şablon dosyası (assets/sablon.xlsx) bulunamadı.');
+    }
+
+    const workbook = XLSX.readFile(TEMPLATE_PATH, {
+      cellStyles: true,
+      cellFormulas: true,
+      cellDates: true,
+    });
+
+    const sheetName = workbook.SheetNames[0] || 'Sheet1';
+    const worksheet = workbook.Sheets[sheetName];
+
+    const rangeBeforeAppend = XLSX.utils.decode_range(worksheet['!ref']);
+    const firstNewRowIndex = rangeBeforeAppend.e.r + 1; // 0-tabanlı
+    let nextId = findMaxExistingId(worksheet, rangeBeforeAppend) + 1;
+
+    const rows = records.map((record) => buildExcelRow(record, nextId++));
+    XLSX.utils.sheet_add_aoa(worksheet, rows, { origin: -1 });
+
+    for (let i = 0; i < rows.length; i++) {
+      const rowIndex = firstNewRowIndex + i;
+      [1, 2].forEach((colIndex) => {
+        const cellRef = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
+        if (worksheet[cellRef]) {
+          worksheet[cellRef].t = 'n';
+          worksheet[cellRef].z = DATE_TIME_NUMBER_FORMAT;
+        }
+      });
+    }
+
+    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx', cellStyles: true });
+
+    const newRange = XLSX.utils.decode_range(worksheet['!ref']);
+    const lastRowExcelNumber = newRange.e.r + 1;
+    const firstNewRowExcelNumber = lastRowExcelNumber - rows.length + 1;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('X-New-Row-Start', String(firstNewRowExcelNumber));
+    res.setHeader('X-New-Row-End', String(lastRowExcelNumber));
+    res.setHeader('Access-Control-Expose-Headers', 'X-New-Row-Start, X-New-Row-End');
+    res.send(buffer);
+  } catch (error) {
+    console.error('Sunucu Excel Hatası:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Telefona indirilen .xlsx dosyası bir ANLIK GÖRÜNTÜDÜR; kendi kendine
 // güncellenemez. Bilgisayardaki Excel'i bir kez aşağıdaki URL'ye bağlarsanız
 // "Veriyi Yenile" (veya dosyayı açınca otomatik yenileme) ile Supabase'deki
@@ -521,65 +627,6 @@ app.get('/excel-feed.csv', feedLimiter, async (req, res) => {
 
 app.get('/excel-feed', feedLimiter, async (req, res) => {
   res.redirect(302, '/excel-feed.csv');
-});
-
-// 2. EXCEL DIŞA AKTARMA ENDPOINT'I ("Excel Dosyasını İndir / Paylaş" butonu)
-// Bu endpoint hiçbir zaman yerel diske kalıcı yazma yapmaz: her istekte
-// şablonu SADECE OKUR, gövdede (body) gelen kayıtları belleğe ekler ve
-// oluşan dosyayı doğrudan yanıt (response) olarak geri döner.
-app.post('/export', exportLimiter, (req, res) => {
-  try {
-    const { records } = req.body;
-    if (!records || !Array.isArray(records)) {
-      return res.status(400).json({ success: false, error: 'Kayıt bulunamadı.' });
-    }
-
-    if (!fs.existsSync(TEMPLATE_PATH)) {
-      throw new Error('Şablon dosyası (assets/sablon.xlsx) bulunamadı.');
-    }
-
-    const workbook = XLSX.readFile(TEMPLATE_PATH, {
-      cellStyles: true,
-      cellFormulas: true,
-      cellDates: true,
-    });
-
-    const sheetName = workbook.SheetNames[0] || 'Sheet1';
-    const worksheet = workbook.Sheets[sheetName];
-
-    const rangeBeforeAppend = XLSX.utils.decode_range(worksheet['!ref']);
-    const firstNewRowIndex = rangeBeforeAppend.e.r + 1; // 0-tabanlı
-    let nextId = findMaxExistingId(worksheet, rangeBeforeAppend) + 1;
-
-    const rows = records.map((record) => buildExcelRow(record, nextId++));
-    XLSX.utils.sheet_add_aoa(worksheet, rows, { origin: -1 });
-
-    for (let i = 0; i < rows.length; i++) {
-      const rowIndex = firstNewRowIndex + i;
-      [1, 2].forEach((colIndex) => {
-        const cellRef = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
-        if (worksheet[cellRef]) {
-          worksheet[cellRef].t = 'n';
-          worksheet[cellRef].z = DATE_TIME_NUMBER_FORMAT;
-        }
-      });
-    }
-
-    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx', cellStyles: true });
-
-    const newRange = XLSX.utils.decode_range(worksheet['!ref']);
-    const lastRowExcelNumber = newRange.e.r + 1;
-    const firstNewRowExcelNumber = lastRowExcelNumber - rows.length + 1;
-
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('X-New-Row-Start', String(firstNewRowExcelNumber));
-    res.setHeader('X-New-Row-End', String(lastRowExcelNumber));
-    res.setHeader('Access-Control-Expose-Headers', 'X-New-Row-Start, X-New-Row-End');
-    res.send(buffer);
-  } catch (error) {
-    console.error("Sunucu Excel Hatası:", error);
-    res.status(500).json({ success: false, error: error.message });
-  }
 });
 
 // 3. FORM GÖRSELİ OLUŞTURMA ENDPOINT'I

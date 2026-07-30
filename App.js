@@ -610,22 +610,10 @@ function AppContent() {
         throw new Error('Sunucudan gelen Excel dosyası beklenenden çok küçük/boş.');
       }
 
-      // Sunucu, yeni kaydın şablonda tam olarak hangi satır(lar)a düştüğünü
-      // header'larla bildiriyor. Aynı plaka/form no şablonda daha önce onlarca
-      // kez geçebildiği için (Ctrl+F ile ararken eski bir kayda denk gelinebilir),
-      // bunu kullanıcıya açıkça göstermek karışıklığı önlüyor.
-      const rowStart = response.headers?.['x-new-row-start'];
-      const rowEnd = response.headers?.['x-new-row-end'];
-      const rowInfo =
-        rowStart && rowEnd
-          ? rowStart === rowEnd
-            ? `Yeni kaydınız Excel'in ${rowStart}. satırına eklendi.`
-            : `Yeni kayıtlarınız Excel'in ${rowStart}-${rowEnd}. satırlarına eklendi.`
-          : null;
-
-      // Sabit dosya adı: her indirmede aynı ada sahip, o ana kadarki TÜM
-      // kayıtları içeren tek/güncel bir dosya üretilir (tarihli/parçalı
-      // kopyalar biriktirmez).
+      // Sabit dosya adı: kullanıcı bu dosyayı bir kez indirip bilgisayarda
+      // kullanır. Dosyanın içinde canlı web sorgusu gömülü olduğu için
+      // (excel-feed.csv), uygulamadan her seferinde tekrar indirmeye gerek
+      // kalmadan Excel'de "Tümü Yenile" ile güncel veri çekilebilir.
       const excelFile = new File(Paths.cache, 'HİZMET ARAÇLARI TAKİP FORMU.xlsx');
       if (excelFile.exists) {
         excelFile.delete();
@@ -633,12 +621,10 @@ function AppContent() {
       excelFile.create();
       excelFile.write(outBytes);
 
-      if (rowInfo) {
-        Alert.alert(
-          'Excel Hazır',
-          `${rowInfo}\n\nNot: Aynı plaka/form no şablonda daha önce de geçmiş olabilir; "Bul" (Ctrl+F) ile ararsanız eski bir kayda denk gelebilirsiniz. En güvenilir yöntem doğrudan bu satır numarasına gitmek veya Ctrl+End ile dosyanın sonuna atlamaktır.`
-        );
-      }
+      Alert.alert(
+        'Excel Hazır',
+        'Bu dosya canlı veriye bağlıdır. Bilgisayarda dosyayı açtıktan sonra "Veri > Tümü Yenile" ile Supabase\'deki en güncel kayıtları çekebilirsiniz.'
+      );
 
       const canShare = await Sharing.isAvailableAsync();
       if (canShare) {
