@@ -43,7 +43,11 @@ app.use(express.json({ limit: '50mb' }));
 // Render.com gibi platformların "servis ayakta mı" kontrolü (health check)
 // için ve tarayıcıdan hızlıca test edebilmek için basit bir kök rota.
 app.get('/', (req, res) => {
-  res.status(200).json({ status: 'ok', message: 'Otopark backend çalışıyor.' });
+  res.status(200).json({
+    status: 'ok',
+    message: 'Otopark backend çalışıyor.',
+    excelFeed: '/excel-feed.csv',
+  });
 });
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -339,6 +343,185 @@ function findMaxExistingId(worksheet, range) {
 // assets/sablon.xlsx şablonunu kullanarak, o an Supabase'den çekilmiş TÜM
 // kayıtları içeren yeni bir Excel dosyası üretir (kalıcı yerel yazma yapmaz).
 const TEMPLATE_PATH = path.join(__dirname, 'assets', 'sablon.xlsx');
+
+// --- Canlı Excel beslemesi (Power Query / "Web'den Veri Al") ---
+// Telefona indirilen .xlsx dosyası bir ANLIK GÖRÜNTÜDÜR; kendi kendine
+// güncellenemez. Bilgisayardaki Excel'i bir kez aşağıdaki URL'ye bağlarsanız
+// "Veriyi Yenile" (veya dosyayı açınca otomatik yenileme) ile Supabase'deki
+// en güncel kayıtlar aynı Excel dosyasına akar; uygulamadan tekrar indirmeye
+// gerek kalmaz.
+//
+// URL: GET https://otopark-app.onrender.com/excel-feed.csv
+const feedLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: 'Çok fazla Excel beslemesi isteği. Lütfen biraz sonra tekrar deneyin.' },
+});
+
+const EXCEL_FEED_HEADERS = [
+  'Id',
+  'Başlangıç saati',
+  'Tamamlama saati',
+  'E-posta',
+  'Ad',
+  'Form Numarası',
+  'Sütun1',
+  'Aracın Çıkış Tarihi',
+  'Plaka',
+  'Sürücü Adı Soyadı',
+  'Departman',
+  'Kullanım Amacı',
+  'Çıkış Km',
+  'Çıkış Saati',
+  'Dönüş Km',
+  'Dönüş Saati',
+  'Aracın Dönüş Tarihi',
+  'Silindi mi',
+  'Kayıt Zamanı',
+];
+
+function csvEscape(value) {
+  if (value == null || value === '') return '';
+  const text = String(value);
+  if (/[",\r\n]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
+function formatTrDateTime(isoOrDate) {
+  if (!isoOrDate) return '';
+  const d = isoOrDate instanceof Date ? isoOrDate : new Date(isoOrDate);
+  if (Number.isNaN(d.getTime())) return String(isoOrDate);
+  return d.toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul' });
+}
+
+function mapSupabaseRowToFeedRecord(row) {
+  return {
+    id: String(row.id),
+    baslangicSaati: row.baslangic_saati || '',
+    tamamlanmaSaati: row.tamamlanma_saati || '',
+    formNo: row.form_no || '',
+    plaka: row.plaka || '',
+    bolum: row.bolum || '',
+    cikisTarihi: row.cikis_tarihi || '',
+    cikisSaati: row.cikis_saati || '',
+    cikisKm: row.cikis_km || '',
+    donusTarihi: row.donus_tarihi || '',
+    donusSaati: row.donus_saati || '',
+    donusKm: row.donus_km || '',
+    gorev: row.gorev || '',
+    surucuAdi: row.surucu_adi || '',
+    isDeleted: row.is_deleted === true,
+    createdAt: row.created_at || '',
+  };
+}
+
+async function fetchAllSupabaseFormRecords() {
+  const supabaseUrl = (
+    process.env.EXPO_PUBLIC_SUPABASE_URL ||
+    process.env.SUPABASE_URL ||
+    ''
+  )
+    .trim()
+    .replace(/\/rest\/v1\/?$/i, '')
+    .replace(/\/+$/, '');
+  const anonKey =
+    process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
+
+  if (!supabaseUrl || !anonKey) {
+    throw new Error(
+      'Sunucuda EXPO_PUBLIC_SUPABASE_URL / EXPO_PUBLIC_SUPABASE_ANON_KEY (veya SUPABASE_*) tanımlı değil.'
+    );
+  }
+
+  const pageSize = 1000;
+  const allRows = [];
+  let from = 0;
+
+  for (;;) {
+    const to = from + pageSize - 1;
+    const endpoint = `${supabaseUrl}/rest/v1/otopark_formlari?select=*&order=id.asc`;
+    const response = await fetch(endpoint, {
+      headers: {
+        apikey: anonKey,
+        Authorization: `Bearer ${anonKey}`,
+        Range: `${from}-${to}`,
+        Prefer: 'count=exact',
+      },
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Supabase okuma hatası (${response.status}): ${body.slice(0, 300)}`);
+    }
+
+    const chunk = await response.json();
+    if (!Array.isArray(chunk) || chunk.length === 0) break;
+    allRows.push(...chunk);
+    if (chunk.length < pageSize) break;
+    from += pageSize;
+  }
+
+  return allRows.map(mapSupabaseRowToFeedRecord);
+}
+
+function buildExcelFeedCsv(records) {
+  const lines = [EXCEL_FEED_HEADERS.map(csvEscape).join(',')];
+
+  records.forEach((record, index) => {
+    const createdAtMs = Number(record.id);
+    const createdAt = Number.isFinite(createdAtMs) ? new Date(createdAtMs) : new Date(record.createdAt || Date.now());
+    const baslangic = combineDateWithTimeString(createdAt, record.baslangicSaati) || createdAt;
+    const tamamlanma = combineDateWithTimeString(createdAt, record.tamamlanmaSaati) || createdAt;
+
+    const row = [
+      index + 1,
+      formatTrDateTime(baslangic),
+      formatTrDateTime(tamamlanma),
+      'anonymous',
+      '',
+      record.formNo || '',
+      '',
+      record.cikisTarihi || '',
+      record.plaka || '',
+      record.surucuAdi || '',
+      record.bolum || '',
+      record.gorev || '',
+      record.cikisKm || '',
+      record.cikisSaati || '',
+      record.donusKm || '',
+      record.donusSaati || '',
+      record.donusTarihi && record.donusTarihi !== record.cikisTarihi ? record.donusTarihi : '',
+      record.isDeleted ? 'Evet' : 'Hayır',
+      formatTrDateTime(record.createdAt || createdAt),
+    ];
+    lines.push(row.map(csvEscape).join(','));
+  });
+
+  // Excel TR için UTF-8 BOM
+  return `\uFEFF${lines.join('\r\n')}`;
+}
+
+app.get('/excel-feed.csv', feedLimiter, async (req, res) => {
+  try {
+    const records = await fetchAllSupabaseFormRecords();
+    const csv = buildExcelFeedCsv(records);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'inline; filename="otopark_formlari_canli.csv"');
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(csv);
+  } catch (error) {
+    console.error('Excel feed hatası:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/excel-feed', feedLimiter, async (req, res) => {
+  res.redirect(302, '/excel-feed.csv');
+});
 
 // 2. EXCEL DIŞA AKTARMA ENDPOINT'I ("Excel Dosyasını İndir / Paylaş" butonu)
 // Bu endpoint hiçbir zaman yerel diske kalıcı yazma yapmaz: her istekte

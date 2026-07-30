@@ -1,0 +1,56 @@
+================================================================================
+CANLI EXCEL BAGLANTISI (Power Query) - Tek seferlik kurulum
+================================================================================
+
+SORUN:
+  Telefondan "Excel Indir" ile gelen dosya bir FOTOGRAF gibidir: o andaki
+  veriyi icerir. Yeni form kaydedince eski dosya KENDILIGINDEN guncellenmez.
+
+COZUM:
+  Bilgisayardaki Excel'i asagidaki adrese BIR KEZ baglayin. Sonra "Yenile"
+  dediginizde (veya dosyayi her actiginizda) yeni kayitlar ayni dosyaya gelir.
+  Uygulamadan tekrar Excel indirmeye gerek kalmaz.
+
+ADRES (kopyalayip Excel'e yapistirin):
+  https://otopark-app.onrender.com/excel-feed.csv
+
+--------------------------------------------------------------------------------
+KURULUM ADIMLARI (Microsoft Excel - Windows)
+--------------------------------------------------------------------------------
+
+1) Excel'de "HIZMET ARACLARI TAKIP FORMU.xlsx" dosyanizi acin
+   (veya yeni bos bir calisma kitabi acin).
+
+2) Ust menuden:  Veri  >  Web'den Veri Al  (Data > From Web)
+
+3) Acilan kutuya su adresi yapistirin:
+   https://otopark-app.onrender.com/excel-feed.csv
+   Tamam / OK
+
+4) Onizleme gelince "Yukle" (Load) deyin.
+   Yeni bir sayfa olusur (ornegin "otopark_formlari_canli").
+   Bu sayfa SUPABASE'deki tum mobil form kayitlarinin canli gorunumudur.
+
+5) Otomatik yenileme (onerilir):
+   - Veri > Sorgular ve Baglantilar
+   - Olusan sorguya sag tik > Ozellikler
+   - "Dosya acildiginda veriyi yenile" isaretleyin
+   - Isterseniz "Her N dakikada bir yenile" (ornegin 10) acin
+
+6) Elle yenilemek icin:
+   Veri > Tumu Yenile  (veya Alt+F5 / Refresh All)
+
+--------------------------------------------------------------------------------
+NOTLAR
+--------------------------------------------------------------------------------
+- Eski Microsoft Forms satirlari Sheet1'de kalabilir; canli mobil veriler
+  ayri sayfada durur. Isterseniz sonra IT ile birlestirilebilir.
+- Ilk acilista Render sunucusu "uyku"dan uyanirken 30-60 sn surebilir;
+  ikinci yenilemede genelde hizli gelir.
+- Render'da EXPO_PUBLIC_SUPABASE_URL ve EXPO_PUBLIC_SUPABASE_ANON_KEY
+  ortam degiskenlerinin tanimli oldugundan emin olun (yoksa besleme hata verir).
+
+Tarayicide test:
+  https://otopark-app.onrender.com/excel-feed.csv
+  CSV aciliyorsa baglanti hazirdir.
+================================================================================
