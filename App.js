@@ -221,7 +221,7 @@ function AppContent() {
   // NOT: Burada SADECE aktif kayıtlar (is_deleted = false) çekilir; "Sil"
   // butonuyla yumuşak-silinmiş (soft-deleted) kayıtlar bu listede ASLA
   // görünmez, ama veritabanından da hiçbir zaman kalıcı olarak silinmezler
-  // (bkz. handleDeleteRecord ve getAllRecordsChronological/Excel dışa aktarma).
+  // (bkz. handleDeleteRecord ve /excel-feed.csv canlı dışa aktarma akışı).
   useEffect(() => {
     let isMounted = true;
     (async () => {
@@ -532,8 +532,8 @@ function AppContent() {
   // YUMUŞAK SİLME (SOFT DELETE): "Sil" butonu veriyi veritabanından KALICI
   // OLARAK asla silmez (HARD DELETE yapılmaz). Sadece is_deleted = true
   // olarak işaretlenir; böylece kayıt "Kaydedilen Formlar" listesinden
-  // kaybolur ama veritabanında ve Excel tam arşivinde (bkz.
-  // getAllRecordsChronological / handleExportExcel) kalıcı olarak kalmaya
+  // kaybolur ama veritabanında ve Excel canlı arşivinde (bkz. /excel-feed.csv)
+  // kalıcı olarak kalmaya
   // devam eder.
   const handleDeleteRecord = async (id) => {
     setRecords((prev) => prev.filter((record) => record.id !== id));
@@ -551,57 +551,14 @@ function AppContent() {
     }
   };
 
-  // "Dosya İndir/Paylaş" her tıklandığında, yerel state'te (bu cihazın
-  // hafızasında) o an ne varsa onunla yetinmek yerine Supabase'deki TÜM
-  // geçmiş kayıtları taze olarak çekiyoruz. Böylece üretilen dosya; başka bir
-  // cihazdan eklenmiş olsa bile bugüne kadar girilmiş tüm formları VE en son
-  // kaydedilen formu bir arada, eskiden yeniye sıralı olarak içerir.
-  // Veritabanı şeması/sütunları değişmiyor; sadece dosya oluşturulmadan önce
-  // "sadece bu cihazdaki liste" yerine "Supabase'deki tam liste" kullanılıyor.
-  //
-  // ÖNEMLİ: Bu sorguya KASITLI olarak is_deleted filtresi EKLENMEMİŞTİR.
-  // Excel'e "tam arşiv" (full archive) kuralı gereği, uygulamadan "Sil"
-  // butonuyla yumuşak-silinmiş (is_deleted = true) kayıtlar DAHİL, bugüne
-  // kadar sisteme girilmiş HER satır Excel çıktısında yer almalıdır.
-  const getAllRecordsChronological = async () => {
-    try {
-      const { data, error } = await supabase
-        .from(SUPABASE_TABLE)
-        .select('*')
-        .order('id', { ascending: true }); // ascending = doğrudan eskiden yeniye
-
-      if (error) throw error;
-      if (data && data.length > 0) {
-        return data.map(mapSupabaseRowToRecord);
-      }
-    } catch (error) {
-      Alert.alert(
-        'Uyarı',
-        'Buluttaki tüm geçmiş kayıtlar alınamadı, bu yüzden sadece bu cihazda görünen ' +
-          'kayıtlarla devam ediliyor. İnternet bağlantınızı kontrol edip tekrar deneyebilirsiniz.\n\n' +
-          (error?.message || '')
-      );
-    }
-    // Supabase boş döndüyse ya da erişilemediyse, en azından bu cihazdaki
-    // yerel listeyle (eskiden yeniye çevrilmiş) devam et.
-    return [...records].reverse();
-  };
-
   const handleExportExcel = async () => {
     setIsExporting(true);
     try {
-      // Excel'i telefonda değil, bilgisayardaki sunucuda (Node.js) oluşturuyoruz.
-      // SheetJS bu boyuttaki (binlerce satırlı) şablonu React Native/Hermes
-      // ortamında güvenilir işleyemiyor; sunucuda ise defalarca doğrulandı.
-      const chronologicalRecords = await getAllRecordsChronological();
-      if (chronologicalRecords.length === 0) {
-        Alert.alert('Uyarı', 'Excel oluşturmak için en az bir kayıtlı form gerekli.');
-        return;
-      }
-
-      const response = await axios.post(
+      // Artık /export endpoint'i, içinde canlı web sorgusu gömülü hazır .xlsx
+      // dosyasını doğrudan döndürüyor. Kullanıcı dosyayı bir kez indirip
+      // bilgisayarda "Tümü Yenile" ile güncel veriyi çekebilir.
+      const response = await axios.get(
         SERVER_EXPORT_URL,
-        { records: chronologicalRecords },
         { timeout: SERVER_REQUEST_TIMEOUT_MS, responseType: 'arraybuffer' }
       );
 
@@ -761,10 +718,10 @@ function AppContent() {
             <TouchableOpacity
               style={[
                 styles.exportButton,
-                (records.length === 0 || isExporting) && styles.disabledButton,
+                isExporting && styles.disabledButton,
               ]}
               onPress={handleExportExcel}
-              disabled={records.length === 0 || isExporting}
+              disabled={isExporting}
             >
               {isExporting ? (
                 <ActivityIndicator color="#FFFFFF" />

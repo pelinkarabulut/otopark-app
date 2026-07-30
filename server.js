@@ -4,7 +4,6 @@ const fs = require('fs');
 const path = require('path');
 const rateLimit = require('express-rate-limit');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const XLSX = require('xlsx');
 const sharp = require('sharp');
 
 // Node bu dosyayı doğrudan `node server.js` ile çalıştırıyor; Expo/Metro'nun
@@ -254,17 +253,6 @@ app.post('/analyze', enforceDailyAnalyzeLimit, analyzeLimiter, async (req, res) 
   res.status(503).json({ success: false, error: friendlyMessage });
 });
 
-// Şablonun Id/Başlangıç saati/Tamamlama saati sütunları için: JS Date'i
-// Excel'in kullandığı seri gün sayısına çevirir (1899-12-30 taban tarihi).
-const EXCEL_EPOCH_OFFSET_DAYS = 25569;
-const MS_PER_DAY = 86400000;
-const DATE_TIME_NUMBER_FORMAT = 'm/d/yy h:mm';
-
-function excelSerialFromDate(date) {
-  const localMs = date.getTime() - date.getTimezoneOffset() * 60000;
-  return localMs / MS_PER_DAY + EXCEL_EPOCH_OFFSET_DAYS;
-}
-
 // Kullanıcının mobil formda elle girdiği "09:00" / "9:00" gibi bir saat
 // metnini, verilen taban tarihin (baseDate) saat/dakikasına uygulayarak yeni
 // bir Date döndürür. Metin boşsa veya "SS:DD" formatına uymuyorsa null
@@ -283,66 +271,10 @@ function combineDateWithTimeString(baseDate, timeString) {
   return combined;
 }
 
-// Excel Şablonuna Satır Dizilimi
-// NOT: 0, 3, 4. sütunlar (Id, E-posta, Ad) Microsoft Forms'un kendi otomatik
-// ürettiği alanlardır. Mobil uygulamadan gelen kayıtlar gerçek bir form
-// gönderimi olmadığı için buradaki değerler (kimlik, e-posta, ad) makul
-// varsayılanlarla dolduruluyor; asıl form verisi 5. sütundan itibaren
-// başlıyor.
-// 1-2. sütunlar (Başlangıç saati / Tamamlama saati) ise artık kullanıcının
-// mobil formda GİRDİĞİ gerçek saatleri yansıtır (bkz. App.js
-// baslangicSaati/tamamlanmaSaati alanları); tarih kısmı için kaydın
-// oluşturulma tarihi (record.id -> zaman damgası) kullanılır. Kullanıcı bu
-// alanları boş bırakmışsa (ör. eski kayıtlar), eski davranışa (kaydın
-// oluşturulma anı) geri düşülür.
-function buildExcelRow(record, nextId) {
-  const row = new Array(20).fill(null);
-
-  const createdAtMs = Number(record.id);
-  const createdAt = Number.isFinite(createdAtMs) ? new Date(createdAtMs) : new Date();
-
-  const baslangicDateTime = combineDateWithTimeString(createdAt, record.baslangicSaati) || createdAt;
-  const tamamlanmaDateTime = combineDateWithTimeString(createdAt, record.tamamlanmaSaati) || createdAt;
-
-  row[0] = nextId;
-  row[1] = excelSerialFromDate(baslangicDateTime);
-  row[2] = excelSerialFromDate(tamamlanmaDateTime);
-  row[3] = 'anonymous';
-  row[4] = null;
-  row[5] = record.formNo || '';
-  row[7] = record.cikisTarihi || '';
-  row[8] = record.plaka || '';
-  row[9] = record.surucuAdi || '';
-  row[10] = record.bolum || '';
-  row[11] = record.gorev || '';
-  row[12] = record.cikisKm || '';
-  row[13] = record.cikisSaati || '';
-  row[14] = record.donusKm || '';
-  row[15] = record.donusSaati || '';
-  row[16] = record.donusTarihi && record.donusTarihi !== record.cikisTarihi ? record.donusTarihi : '';
-  return row;
-}
-
-function findMaxExistingId(worksheet, range) {
-  let maxId = 0;
-  for (let r = range.s.r + 1; r <= range.e.r; r++) {
-    const cell = worksheet[XLSX.utils.encode_cell({ r, c: 0 })];
-    if (cell && typeof cell.v === 'number' && cell.v > maxId) {
-      maxId = cell.v;
-    }
-  }
-  return maxId;
-}
-
-// NOT: Daha önce burada, form kaydedildiği anda bilgisayardaki belirli bir
-// .xlsx dosyasına DOĞRUDAN yazan bir mekanizma (/append-to-excel) vardı. Bu,
-// server.js'in belirli bir bilgisayarda sürekli açık kalmasını VE telefonun
-// o bilgisayarla aynı Wi-Fi ağında olmasını gerektirdiği için KALDIRILDI.
-// Artık tek gerçek veri kaynağı (source of truth) Supabase'dir (bkz. App.js
-// handleSaveRecord). "Dosya İndir/Paylaş" butonu ise projeye gömülü
-// assets/sablon.xlsx şablonunu kullanarak, o an Supabase'den çekilmiş TÜM
-// kayıtları içeren yeni bir Excel dosyası üretir (kalıcı yerel yazma yapmaz).
-const TEMPLATE_PATH = path.join(__dirname, 'assets', 'sablon.xlsx');
+// /export için tek kaynak: Excel uygulamasında manuel hazırlanmış, içinde
+// https://otopark-app.onrender.com/excel-feed.csv bağlantısı gömülü temiz
+// şablon dosyası. Kod ile .xlsx üretimi YOK; sunucu bu dosyayı olduğu gibi
+// istemciye servis eder.
 // Uygulamadan indirilen Excel: içinde Power/Web Query olarak
 // /excel-feed.csv adresine önceden bağlı canlı şablon.
 const LIVE_EXPORT_TEMPLATE_PATH = path.join(__dirname, 'assets', 'canli_otopark_sablon.xlsx');
@@ -351,24 +283,14 @@ function sendLiveExcelTemplate(res) {
   if (!fs.existsSync(LIVE_EXPORT_TEMPLATE_PATH)) {
     throw new Error(
       'Canlı Excel şablonu (assets/canli_otopark_sablon.xlsx) bulunamadı. ' +
-        'Sunucuda `node scripts/build-live-excel-template.js` çalıştırın.'
+        'Excel uygulamasında manuel olarak oluşturduğunuz temiz şablonu bu konuma kopyalayın.'
     );
   }
-
-  const buffer = fs.readFileSync(LIVE_EXPORT_TEMPLATE_PATH);
-  res.setHeader(
-    'Content-Type',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-  );
-  res.setHeader(
-    'Content-Disposition',
-    'attachment; filename="HIZMET_ARACLARI_TAKIP_FORMU_CANLI.xlsx"'
-  );
   res.setHeader('X-Excel-Mode', 'live-web-query');
   res.setHeader('X-Excel-Feed', 'https://otopark-app.onrender.com/excel-feed.csv');
   res.setHeader('Access-Control-Expose-Headers', 'X-Excel-Mode, X-Excel-Feed');
   res.setHeader('Cache-Control', 'no-store');
-  res.send(buffer);
+  res.download(LIVE_EXPORT_TEMPLATE_PATH, 'HIZMET_ARACLARI_TAKIP_FORMU_CANLI.xlsx');
 }
 
 // 2. EXCEL DIŞA AKTARMA ENDPOINT'I ("Excel Dosyasını İndir / Paylaş" butonu)
@@ -388,63 +310,6 @@ app.post('/export', exportLimiter, (req, res) => {
 app.get('/export', exportLimiter, (req, res) => {
   try {
     sendLiveExcelTemplate(res);
-  } catch (error) {
-    console.error('Sunucu Excel Hatası:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// (Eski davranış yedeği: gövdede records ile şablona satır ekleme — artık
-// varsayılan /export kullanılmıyor. Gerekirse /export-snapshot ile erişilir.)
-app.post('/export-snapshot', exportLimiter, (req, res) => {
-  try {
-    const { records } = req.body;
-    if (!records || !Array.isArray(records)) {
-      return res.status(400).json({ success: false, error: 'Kayıt bulunamadı.' });
-    }
-
-    if (!fs.existsSync(TEMPLATE_PATH)) {
-      throw new Error('Şablon dosyası (assets/sablon.xlsx) bulunamadı.');
-    }
-
-    const workbook = XLSX.readFile(TEMPLATE_PATH, {
-      cellStyles: true,
-      cellFormulas: true,
-      cellDates: true,
-    });
-
-    const sheetName = workbook.SheetNames[0] || 'Sheet1';
-    const worksheet = workbook.Sheets[sheetName];
-
-    const rangeBeforeAppend = XLSX.utils.decode_range(worksheet['!ref']);
-    const firstNewRowIndex = rangeBeforeAppend.e.r + 1; // 0-tabanlı
-    let nextId = findMaxExistingId(worksheet, rangeBeforeAppend) + 1;
-
-    const rows = records.map((record) => buildExcelRow(record, nextId++));
-    XLSX.utils.sheet_add_aoa(worksheet, rows, { origin: -1 });
-
-    for (let i = 0; i < rows.length; i++) {
-      const rowIndex = firstNewRowIndex + i;
-      [1, 2].forEach((colIndex) => {
-        const cellRef = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
-        if (worksheet[cellRef]) {
-          worksheet[cellRef].t = 'n';
-          worksheet[cellRef].z = DATE_TIME_NUMBER_FORMAT;
-        }
-      });
-    }
-
-    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx', cellStyles: true });
-
-    const newRange = XLSX.utils.decode_range(worksheet['!ref']);
-    const lastRowExcelNumber = newRange.e.r + 1;
-    const firstNewRowExcelNumber = lastRowExcelNumber - rows.length + 1;
-
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('X-New-Row-Start', String(firstNewRowExcelNumber));
-    res.setHeader('X-New-Row-End', String(lastRowExcelNumber));
-    res.setHeader('Access-Control-Expose-Headers', 'X-New-Row-Start, X-New-Row-End');
-    res.send(buffer);
   } catch (error) {
     console.error('Sunucu Excel Hatası:', error);
     res.status(500).json({ success: false, error: error.message });
