@@ -141,9 +141,9 @@ function enforceDailyAnalyzeLimit(req, res, next) {
 // bu API sürümünde kalıcı olarak 404 (artık mevcut değil) döndüğü için listeden
 // çıkarıldı; her istekte gereksiz yere denenip konsolu kirletmesinler diye.
 const GEMINI_MODEL_CANDIDATES = [
-  "gemini-2.5-flash",
-  "gemini-2.5-pro",
+  "gemini-3.6-flash",
   "gemini-flash-latest",
+  "gemini-3.1-pro-preview",
 ];
 
 // Bir model denemesinden gelen hatayı, konsolu kilometrelerce JSON ile
