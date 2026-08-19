@@ -141,9 +141,8 @@ function enforceDailyAnalyzeLimit(req, res, next) {
 // bu API sürümünde kalıcı olarak 404 (artık mevcut değil) döndüğü için listeden
 // çıkarıldı; her istekte gereksiz yere denenip konsolu kirletmesinler diye.
 const GEMINI_MODEL_CANDIDATES = [
-  "gemini-1.5-flash",
-  "gemini-1.5-pro",
-  "gemini-2.0-flash",
+  "gemini-2.5-flash",
+  "gemini-2.5-pro",
   "gemini-flash-latest",
 ];
 
@@ -264,6 +263,9 @@ app.post('/analyze', enforceDailyAnalyzeLimit, analyzeLimiter, async (req, res) 
         allQuotaExceeded = false;
       }
       lastError = error;
+      if (status === 429 || status === 503) {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
     }
   }
 
