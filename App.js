@@ -104,11 +104,11 @@ const EMPTY_FORM = {
 };
 
 // Gemini'ye/sunucuya göndermeden önce görseli küçültüp sıkıştırmak için
-// kullanılan sınırlar. 1280px + %70-80 JPEG kalitesi, plaka/el yazısı gibi
-// ince metinlerin okunabilirliğini bozmadan dosya boyutunu (genelde 8-10 MB
-// -> 300-500 KB) ciddi oranda düşürüyor ve yükleme/analiz süresini kısaltıyor.
-const MAX_ANALYSIS_DIMENSION = 1280;
-const ANALYSIS_JPEG_QUALITY = 0.6;
+// kullanılan sınırlar. 900px genişlik + %50 JPEG compress, plaka/el yazısı
+// okunabilirliğini çok bozmadan dosya boyutunu küçültür ve base64 üretim
+// süresini azaltır.
+const MAX_ANALYSIS_DIMENSION = 900;
+const ANALYSIS_JPEG_QUALITY = 0.5;
 
 const SUPABASE_TABLE = 'otopark_formlari';
 
@@ -236,6 +236,7 @@ function AppContent() {
   const [hasResult, setHasResult] = useState(false);
   const [records, setRecords] = useState([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isOptimizingImage, setIsOptimizingImage] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isLoadingRecords, setIsLoadingRecords] = useState(true);
 
@@ -292,14 +293,29 @@ function AppContent() {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images'],
         allowsEditing: false,
-        quality: 0.8,
+        quality: 0.6,
       });
 
       if (result.canceled || !result.assets || result.assets.length === 0) {
         return;
       }
 
-      setSelectedAsset(result.assets[0]);
+      const pickedAsset = result.assets[0];
+      setIsOptimizingImage(true);
+      try {
+        // Analiz gecikmesini minimize etmek için optimizasyonu
+        // "Formu Oku" butonuna basmadan hemen yapıyoruz.
+        const optimized = await optimizeImageForAnalysis(pickedAsset);
+        setSelectedAsset({
+          uri: optimized.uri,
+          base64Image: optimized.base64Image,
+        });
+      } catch {
+        // Optimizasyon başarısızsa, en azından önizleme için orijinali sakla.
+        setSelectedAsset(pickedAsset);
+      } finally {
+        setIsOptimizingImage(false);
+      }
       setFormData(EMPTY_FORM);
       setHasResult(false);
     } catch (error) {
@@ -307,38 +323,23 @@ function AppContent() {
     }
   };
 
-  // Analiz için gönderilecek görseli, okuma (OCR) hassasiyetini bozmadan
-  // küçültüp sıkıştırır: en uzun kenar MAX_ANALYSIS_DIMENSION ile sınırlanır
-  // (küçük görseller büyütülmez, en-boy oranı korunur) ve %75 JPEG kalitesiyle
-  // yeniden kodlanır. Form yapısı/okuma mantığı değişmez; sadece iletilen
-  // dosyanın boyutu küçülür.
+  // Analiz için görseli native tarafında sıkıştırıp yeniden kodlarız.
+  // Böylece JS thread'de (renderAsync/saveAsync gibi) yaşanabilen gecikme azalır.
   const optimizeImageForAnalysis = async (asset) => {
-    const context = ImageManipulator.manipulate(asset.uri);
-    const { width, height } = asset;
-
-    if (width && height) {
-      if (width >= height && width > MAX_ANALYSIS_DIMENSION) {
-        context.resize({ width: MAX_ANALYSIS_DIMENSION });
-      } else if (height > width && height > MAX_ANALYSIS_DIMENSION) {
-        context.resize({ height: MAX_ANALYSIS_DIMENSION });
+    const optimized = await ImageManipulator.manipulateAsync(
+      asset.uri,
+      [{ resize: { width: MAX_ANALYSIS_DIMENSION } }],
+      {
+        compress: ANALYSIS_JPEG_QUALITY,
+        format: SaveFormat.JPEG,
+        base64: true, // base64'i direkt manipülasyon çıktısından alıyoruz
       }
-      // İki boyut da sınırın altındaysa hiç resize uygulanmaz (büyütme yok).
-    } else {
-      // Boyut bilgisi gelmemişse güvenli tarafta kalıp genişliği sınırla;
-      // tek boyut verildiği için en-boy oranı otomatik korunur.
-      context.resize({ width: MAX_ANALYSIS_DIMENSION });
-    }
+    );
 
-    const renderedImage = await context.renderAsync();
-    const result = await renderedImage.saveAsync({
-      compress: ANALYSIS_JPEG_QUALITY,
-      format: SaveFormat.JPEG,
-    });
-
-    context.release();
-    renderedImage.release();
-
-    return result;
+    return {
+      uri: optimized.uri,
+      base64Image: optimized.base64 ?? null,
+    };
   };
 
   const handleAnalyze = async () => {
@@ -350,9 +351,14 @@ function AppContent() {
     setIsAnalyzing(true);
 
     try {
-      const optimized = await optimizeImageForAnalysis(selectedAsset);
-      const imageFile = new File(optimized.uri);
-      const base64Image = await imageFile.base64();
+      let base64Image = selectedAsset?.base64Image;
+
+      // Eski akış/özel durumlarda base64 yoksa son çare olarak burada üret.
+      if (!base64Image) {
+        const optimized = await optimizeImageForAnalysis(selectedAsset);
+        base64Image = optimized?.base64Image;
+      }
+
       if (!base64Image) {
         throw new Error('Görsel base64 formatına dönüştürülemedi.');
       }
@@ -694,12 +700,12 @@ function AppContent() {
             <TouchableOpacity
               style={[
                 styles.primaryButton,
-                (!selectedAsset || isAnalyzing) && styles.disabledButton,
+                (!selectedAsset || isAnalyzing || isOptimizingImage) && styles.disabledButton,
               ]}
               onPress={handleAnalyze}
-              disabled={!selectedAsset || isAnalyzing}
+              disabled={!selectedAsset || isAnalyzing || isOptimizingImage}
             >
-              {isAnalyzing ? (
+              {isAnalyzing || isOptimizingImage ? (
                 <ActivityIndicator color="#FFFFFF" />
               ) : (
                 <Text style={styles.primaryButtonText}>✨ Formu Oku</Text>

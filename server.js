@@ -141,8 +141,8 @@ function enforceDailyAnalyzeLimit(req, res, next) {
 // bu API sürümünde kalıcı olarak 404 (artık mevcut değil) döndüğü için listeden
 // çıkarıldı; her istekte gereksiz yere denenip konsolu kirletmesinler diye.
 const GEMINI_MODEL_CANDIDATES = [
-  "gemini-flash-latest",
   "gemini-3.6-flash",
+  "gemini-flash-latest",
 ];
 
 // Bir model denemesinden gelen hatayı, konsolu kilometrelerce JSON ile
@@ -216,14 +216,44 @@ app.post('/analyze', enforceDailyAnalyzeLimit, analyzeLimiter, async (req, res) 
   for (const modelName of GEMINI_MODEL_CANDIDATES) {
     console.log(`[Analyze] "${modelName}" modeli deneniyor...`);
     try {
+      const baseGenerationConfig = {
+        responseMimeType: 'application/json',
+        temperature: 0.1,
+        maxOutputTokens: 600,
+      };
+
       const model = genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.1,
+          ...baseGenerationConfig,
+          // Desteklenmiyorsa bazı hesap/SDK'larda hata dönebilir.
+          // O yüzden generateContent başarısız olursa aşağıda tek sefer thinkingConfig'siz retry yapıyoruz.
+          thinkingConfig: { thinkingBudget: 0 },
         },
       });
-      const result = await model.generateContent([prompt, ...imageParts]);
+
+      let result;
+      try {
+        result = await model.generateContent([prompt, ...imageParts]);
+      } catch (thinkingError) {
+        const thinkingMsg = String(thinkingError?.message || '');
+        const thinkingStatus = thinkingError?.status || thinkingError?.response?.status;
+        const looksLikeThinkingConfigIssue =
+          thinkingStatus === 400 ||
+          /thinking|thinkingBudget|thinkingconfig/i.test(thinkingMsg);
+
+        if (!looksLikeThinkingConfigIssue) throw thinkingError;
+
+        console.warn(
+          `⚠️ [Analyze] thinkingConfig desteklenmiyor olabilir (${modelName}). thinkingConfig'siz tekrar deniyorum...`
+        );
+        const fallbackModel = genAI.getGenerativeModel({
+          model: modelName,
+          generationConfig: baseGenerationConfig,
+        });
+        result = await fallbackModel.generateContent([prompt, ...imageParts]);
+      }
+
       const responseText = result.response.text();
       console.log(`[Analyze] "${modelName}" ham yanıt (ilk 500 karakter):`, responseText.slice(0, 500));
 
