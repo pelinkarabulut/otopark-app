@@ -49,14 +49,22 @@ app.get('/', (req, res) => {
   });
 });
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', uptime: process.uptime() });
+});
+
+app.get('/ping', (req, res) => {
+  res.status(200).send('pong');
+});
+
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 if (!GEMINI_API_KEY) {
   console.error(
-    'HATA: GEMINI_API_KEY tanımlı değil. Proje kök dizinindeki .env dosyasına ' +
-      '"GEMINI_API_KEY=..." satırını ekleyip sunucuyu yeniden başlatın.'
+    '❌ GEMINI API KEY BULUNAMADI. .env dosyasına GEMINI_API_KEY=... satırını ekleyip sunucuyu yeniden başlatın.'
   );
   process.exit(1);
 }
+console.log(`🔑 Gemini API Key yüklendi (ilk 8 karakter): ${GEMINI_API_KEY.slice(0, 8)}...`);
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 // NOT: Bu projede daha önce Google E-Tablolar (Sheets API) entegrasyonu, yerel
@@ -133,10 +141,10 @@ function enforceDailyAnalyzeLimit(req, res, next) {
 // bu API sürümünde kalıcı olarak 404 (artık mevcut değil) döndüğü için listeden
 // çıkarıldı; her istekte gereksiz yere denenip konsolu kirletmesinler diye.
 const GEMINI_MODEL_CANDIDATES = [
-  "gemini-flash-latest",
-  "gemini-2.0-flash-lite",
-  "gemini-2.0-flash-001",
+  "gemini-1.5-flash",
+  "gemini-1.5-pro",
   "gemini-2.0-flash",
+  "gemini-flash-latest",
 ];
 
 // Bir model denemesinden gelen hatayı, konsolu kilometrelerce JSON ile
@@ -177,6 +185,16 @@ function extractJsonFromModelResponse(responseText) {
 app.post('/analyze', enforceDailyAnalyzeLimit, analyzeLimiter, async (req, res) => {
   console.log('\n========== [Analyze] /analyze isteği alındı ==========');
   console.log('[Analyze] İstek zamanı:', new Date().toISOString());
+  console.log(`[Analyze] API Key aktif: ${GEMINI_API_KEY ? 'Evet (' + GEMINI_API_KEY.slice(0, 8) + '...)' : 'HAYIR'}`);
+  console.log(`[Analyze] Denenecek modeller: ${GEMINI_MODEL_CANDIDATES.join(', ')}`);
+
+  if (!GEMINI_API_KEY) {
+    console.error('❌ GEMINI API KEY BULUNAMADI - istek reddedildi.');
+    return res.status(500).json({
+      success: false,
+      error: 'Sunucuda Gemini API anahtarı tanımlı değil. Lütfen yöneticiye bildirin.',
+    });
+  }
 
   const { base64Image } = req.body;
 
@@ -234,12 +252,17 @@ app.post('/analyze', enforceDailyAnalyzeLimit, analyzeLimiter, async (req, res) 
       console.log(`✅ [Analyze] "${modelName}" modeliyle başarıyla analiz edildi. Çıkarılan veri:`, JSON.stringify(data));
       return res.json({ success: true, data, model: modelName });
     } catch (error) {
-      const status = error?.status || error?.response?.status;
-      console.error(`[Analyze] "${modelName}" API HATASI. status=${status}, message=${error?.message}`);
+      const status = error?.status || error?.response?.status || error?.httpErrorCode;
+      const errorBody = error?.response?.data || error?.errorDetails || null;
+      console.error(`❌ [Analyze] "${modelName}" API HATASI:`);
+      console.error(`   status  = ${status}`);
+      console.error(`   message = ${error?.message}`);
+      if (errorBody) {
+        console.error(`   body    = ${JSON.stringify(errorBody).slice(0, 500)}`);
+      }
       if (status !== 429) {
         allQuotaExceeded = false;
       }
-      console.warn(`⚠️  [Analyze] "${modelName}" başarısız: ${summarizeGeminiError(error)}`);
       lastError = error;
     }
   }

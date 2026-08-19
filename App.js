@@ -37,10 +37,34 @@ const SERVER_ANALYZE_URL = `${SERVER_BASE_URL}/analyze`;
 const SERVER_EXPORT_URL = `${SERVER_BASE_URL}/export`;
 const SERVER_FORM_IMAGE_URL = `${SERVER_BASE_URL}/form-image`;
 
+const SERVER_HEALTH_URL = `${SERVER_BASE_URL}/health`;
+
 // Render'ın ücretsiz katmanı, sunucu ~15 dakika hiç istek almazsa onu
 // uyutuyor; bir sonraki istek sunucuyu uyandırırken bazen 60 saniyeyi bile
-// aşabiliyor. Bu yüzden zaman aşımını cömert (90 sn) tutuyoruz.
+// aşabiliyor. Bu yüzden zaman aşımını cömert tutuyoruz.
 const SERVER_REQUEST_TIMEOUT_MS = 90000;
+
+const MAX_RETRIES = 2;
+const INITIAL_RETRY_DELAY_MS = 3000;
+
+async function axiosWithRetry(config) {
+  let lastError;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await axios(config);
+    } catch (error) {
+      lastError = error;
+      const isRetryable =
+        !error.response ||
+        error.response.status >= 500 ||
+        error.code === 'ECONNABORTED';
+      if (!isRetryable || attempt === MAX_RETRIES) throw error;
+      const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastError;
+}
 
 // axios bir zaman aşımına (timeout) uğradığında error.response HİÇ olmaz;
 // bu da gerçekte "sunucu var ama uyanması uzun sürdü" durumunu, sunucuya hiç
@@ -224,6 +248,10 @@ function AppContent() {
   // (bkz. handleDeleteRecord ve /excel-feed.csv canlı dışa aktarma akışı).
   useEffect(() => {
     let isMounted = true;
+
+    // Sunucuyu sessizce uyandır (Render free tier cold start).
+    axios.get(SERVER_HEALTH_URL, { timeout: 15000 }).catch(() => {});
+
     (async () => {
       try {
         const { data, error } = await supabase
@@ -236,8 +264,7 @@ function AppContent() {
           setRecords(data.map(mapSupabaseRowToRecord));
         }
       } catch (error) {
-        // Liste boş kalır; kullanıcı Alert ile ayrıca bilgilendirilmez (sessiz
-        // açılış). Ağ yoksa yerel boş liste ile devam edilir.
+        // Liste boş kalır; sessiz açılış.
       } finally {
         if (isMounted) {
           setIsLoadingRecords(false);
@@ -330,11 +357,12 @@ function AppContent() {
         throw new Error('Görsel base64 formatına dönüştürülemedi.');
       }
 
-      const response = await axios.post(
-        SERVER_ANALYZE_URL,
-        { base64Image },
-        { timeout: SERVER_REQUEST_TIMEOUT_MS }
-      );
+      const response = await axiosWithRetry({
+        method: 'post',
+        url: SERVER_ANALYZE_URL,
+        data: { base64Image },
+        timeout: SERVER_REQUEST_TIMEOUT_MS,
+      });
 
       const payload = response.data;
       if (!payload || payload.success !== true || !payload.data || typeof payload.data !== 'object') {
@@ -354,7 +382,16 @@ function AppContent() {
       if (serverMessage) {
         Alert.alert('Analiz Başarısız', serverMessage);
       } else {
-        Alert.alert('Sunucuya Bağlanılamadı', getServerConnectionErrorMessage(error));
+        const isTimeout =
+          error?.code === 'ECONNABORTED' || /timeout/i.test(error?.message || '');
+        if (isTimeout) {
+          Alert.alert(
+            'Sunucu Başlatılıyor',
+            'Sunucu uyku modundan uyanıyor olabilir. Lütfen birkaç saniye sonra tekrar deneyin.'
+          );
+        } else {
+          Alert.alert('Sunucuya Bağlanılamadı', getServerConnectionErrorMessage(error));
+        }
       }
     } finally {
       setIsAnalyzing(false);
@@ -374,11 +411,13 @@ function AppContent() {
     const fileName = `${sanitizeForFileName(formData.plaka || formData.formNo)}_${timestampSuffix()}.jpeg`;
 
     try {
-      const response = await axios.post(
-        SERVER_FORM_IMAGE_URL,
-        { formData },
-        { timeout: SERVER_REQUEST_TIMEOUT_MS, responseType: 'arraybuffer' }
-      );
+      const response = await axiosWithRetry({
+        method: 'post',
+        url: SERVER_FORM_IMAGE_URL,
+        data: { formData },
+        timeout: SERVER_REQUEST_TIMEOUT_MS,
+        responseType: 'arraybuffer',
+      });
       const bytes = new Uint8Array(response.data);
       if (!bytes || bytes.length < 100) {
         throw new Error('Sunucudan gelen form görseli boş/bozuk.');
@@ -557,10 +596,12 @@ function AppContent() {
       // Artık /export endpoint'i, içinde canlı web sorgusu gömülü hazır .xlsx
       // dosyasını doğrudan döndürüyor. Kullanıcı dosyayı bir kez indirip
       // bilgisayarda "Tümü Yenile" ile güncel veriyi çekebilir.
-      const response = await axios.get(
-        SERVER_EXPORT_URL,
-        { timeout: SERVER_REQUEST_TIMEOUT_MS, responseType: 'arraybuffer' }
-      );
+      const response = await axiosWithRetry({
+        method: 'get',
+        url: SERVER_EXPORT_URL,
+        timeout: SERVER_REQUEST_TIMEOUT_MS,
+        responseType: 'arraybuffer',
+      });
 
       const outBytes = new Uint8Array(response.data);
       if (!outBytes || outBytes.length < 1000) {
@@ -593,10 +634,19 @@ function AppContent() {
         Alert.alert('Kaydedildi', `Excel dosyası kaydedildi: ${excelFile.uri}`);
       }
     } catch (error) {
-      Alert.alert(
-        'Sunucuya Bağlanılamadı',
-        `Excel oluşturulamadı. ${getServerConnectionErrorMessage(error)}`
-      );
+      const isTimeout =
+        error?.code === 'ECONNABORTED' || /timeout/i.test(error?.message || '');
+      if (isTimeout) {
+        Alert.alert(
+          'Sunucu Başlatılıyor',
+          'Sunucu uyku modundan uyanıyor olabilir. Lütfen birkaç saniye sonra tekrar deneyin.'
+        );
+      } else {
+        Alert.alert(
+          'Sunucuya Bağlanılamadı',
+          `Excel oluşturulamadı. ${getServerConnectionErrorMessage(error)}`
+        );
+      }
     } finally {
       setIsExporting(false);
     }
