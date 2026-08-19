@@ -141,8 +141,9 @@ function enforceDailyAnalyzeLimit(req, res, next) {
 // bu API sürümünde kalıcı olarak 404 (artık mevcut değil) döndüğü için listeden
 // çıkarıldı; her istekte gereksiz yere denenip konsolu kirletmesinler diye.
 const GEMINI_MODEL_CANDIDATES = [
-  "gemini-3.6-flash",
   "gemini-flash-latest",
+  "gemini-3.6-flash",
+  "gemini-3.1-pro-preview",
 ];
 
 // Bir model denemesinden gelen hatayı, konsolu kilometrelerce JSON ile
@@ -165,18 +166,23 @@ function summarizeGeminiError(error) {
 // bloklarını temizleyip deniyoruz; o da başarısız olursa metindeki ilk "{" ile
 // son "}" arasını çıkarıp tekrar deniyoruz.
 function extractJsonFromModelResponse(responseText) {
-  const withoutFences = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
-  try {
-    return JSON.parse(withoutFences);
-  } catch (firstError) {
-    const start = withoutFences.indexOf('{');
-    const end = withoutFences.lastIndexOf('}');
-    if (start !== -1 && end !== -1 && end > start) {
-      const candidate = withoutFences.slice(start, end + 1);
-      return JSON.parse(candidate); // Başarısız olursa hatayı yukarı fırlatsın.
-    }
-    throw firstError;
+  if (typeof responseText !== 'string') {
+    throw new Error('Model yanıtı string formatında değil.');
   }
+
+  // JSON'u sarmalayan olası markdown kalıplarını temizle.
+  const cleaned = responseText
+    .replace(/```(?:json)?/gi, '')
+    .replace(/```/g, '')
+    .trim();
+
+  // Yanıtın içinde ekstra açıklama varsa sadece { ... } kısmını parse etmeye çalış.
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  const candidate =
+    start !== -1 && end !== -1 && end > start ? cleaned.slice(start, end + 1) : cleaned;
+
+  return JSON.parse(candidate);
 }
 
 // 1. GÖRSEL ANALİZ ENDPOINT'I
@@ -216,43 +222,16 @@ app.post('/analyze', enforceDailyAnalyzeLimit, analyzeLimiter, async (req, res) 
   for (const modelName of GEMINI_MODEL_CANDIDATES) {
     console.log(`[Analyze] "${modelName}" modeli deneniyor...`);
     try {
-      const baseGenerationConfig = {
-        responseMimeType: 'application/json',
-        temperature: 0.1,
-        maxOutputTokens: 600,
-      };
-
       const model = genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
-          ...baseGenerationConfig,
-          // Desteklenmiyorsa bazı hesap/SDK'larda hata dönebilir.
-          // O yüzden generateContent başarısız olursa aşağıda tek sefer thinkingConfig'siz retry yapıyoruz.
-          thinkingConfig: { thinkingBudget: 0 },
+          responseMimeType: 'application/json',
+          temperature: 0.1,
+          // JSON ortada kesilip parse hatası vermesin diye yüksek değer.
+          maxOutputTokens: 2048,
         },
       });
-
-      let result;
-      try {
-        result = await model.generateContent([prompt, ...imageParts]);
-      } catch (thinkingError) {
-        const thinkingMsg = String(thinkingError?.message || '');
-        const thinkingStatus = thinkingError?.status || thinkingError?.response?.status;
-        const looksLikeThinkingConfigIssue =
-          thinkingStatus === 400 ||
-          /thinking|thinkingBudget|thinkingconfig/i.test(thinkingMsg);
-
-        if (!looksLikeThinkingConfigIssue) throw thinkingError;
-
-        console.warn(
-          `⚠️ [Analyze] thinkingConfig desteklenmiyor olabilir (${modelName}). thinkingConfig'siz tekrar deniyorum...`
-        );
-        const fallbackModel = genAI.getGenerativeModel({
-          model: modelName,
-          generationConfig: baseGenerationConfig,
-        });
-        result = await fallbackModel.generateContent([prompt, ...imageParts]);
-      }
+      const result = await model.generateContent([prompt, ...imageParts]);
 
       const responseText = result.response.text();
       console.log(`[Analyze] "${modelName}" ham yanıt (ilk 500 karakter):`, responseText.slice(0, 500));
@@ -286,7 +265,7 @@ app.post('/analyze', enforceDailyAnalyzeLimit, analyzeLimiter, async (req, res) 
       }
       lastError = error;
       if (status === 429 || status === 503) {
-        await new Promise((r) => setTimeout(r, 1000));
+        await new Promise((r) => setTimeout(r, 2000));
       }
     }
   }
