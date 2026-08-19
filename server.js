@@ -141,9 +141,8 @@ function enforceDailyAnalyzeLimit(req, res, next) {
 // bu API sürümünde kalıcı olarak 404 (artık mevcut değil) döndüğü için listeden
 // çıkarıldı; her istekte gereksiz yere denenip konsolu kirletmesinler diye.
 const GEMINI_MODEL_CANDIDATES = [
-  "gemini-3.6-flash",
   "gemini-flash-latest",
-  "gemini-3.1-pro-preview",
+  "gemini-3.6-flash",
 ];
 
 // Bir model denemesinden gelen hatayı, konsolu kilometrelerce JSON ile
@@ -203,20 +202,7 @@ app.post('/analyze', enforceDailyAnalyzeLimit, analyzeLimiter, async (req, res) 
   }
   console.log(`[Analyze] Gelen görsel boyutu (base64): ~${Math.round((base64Image.length * 0.75) / 1024)} KB`);
 
-  const prompt = `Bu bir otopark araç görev formudur. Görseldeki el yazısı verilerini oku ve SADECE aşağıdaki JSON formatında yanıt ver. Ekstra hiçbir açıklama veya markdown bloğu yazma:
-    {
-      "form_no": "form numarası",
-      "plaka": "plaka",
-      "bolum": "departman / bölüm",
-      "cikis_tarihi": "tarih",
-      "cikis_saati": "çıkış saati",
-      "cikis_km": "çıkış km",
-      "donus_tarihi": "dönüş tarihi",
-      "donus_saati": "dönüş saati",
-      "donus_km": "dönüş km",
-      "gorev": "araç kullanım amacı / görev",
-      "surucu_adi": "sürücü adı soyadı"
-    }`;
+  const prompt = `Görseldeki otopark formunu oku. JSON döndür: {"form_no":"","plaka":"","bolum":"","cikis_tarihi":"","cikis_saati":"","cikis_km":"","donus_tarihi":"","donus_saati":"","donus_km":"","gorev":"","surucu_adi":""}`;
 
   const imageParts = [{
     inlineData: {
@@ -230,7 +216,13 @@ app.post('/analyze', enforceDailyAnalyzeLimit, analyzeLimiter, async (req, res) 
   for (const modelName of GEMINI_MODEL_CANDIDATES) {
     console.log(`[Analyze] "${modelName}" modeli deneniyor...`);
     try {
-      const model = genAI.getGenerativeModel({ model: modelName });
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        generationConfig: {
+          responseMimeType: 'application/json',
+          temperature: 0.1,
+        },
+      });
       const result = await model.generateContent([prompt, ...imageParts]);
       const responseText = result.response.text();
       console.log(`[Analyze] "${modelName}" ham yanıt (ilk 500 karakter):`, responseText.slice(0, 500));

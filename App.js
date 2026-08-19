@@ -108,7 +108,7 @@ const EMPTY_FORM = {
 // ince metinlerin okunabilirliğini bozmadan dosya boyutunu (genelde 8-10 MB
 // -> 300-500 KB) ciddi oranda düşürüyor ve yükleme/analiz süresini kısaltıyor.
 const MAX_ANALYSIS_DIMENSION = 1280;
-const ANALYSIS_JPEG_QUALITY = 0.75;
+const ANALYSIS_JPEG_QUALITY = 0.6;
 
 const SUPABASE_TABLE = 'otopark_formlari';
 
